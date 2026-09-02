@@ -31,3 +31,8 @@ This project provides a python package including a CLI to build an application g
 - Application projects are cross-platform from day 1 (there is a BSP for 'linux-host')
 
 
+## related repostories
+They are cloned at the same level as this one.
+
+- [`lean-bsp-linux-host`](https://github.com/sebastien-riou/lean-bsp-linux-host): the linux-host BSP
+- [`lean-app-hello-world`](https://github.com/sebastien-riou/lean-app-hello-world): minimal example of a cross platform project using this framework
