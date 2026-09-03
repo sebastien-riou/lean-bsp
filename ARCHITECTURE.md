@@ -258,11 +258,35 @@ one of its attributes, not the disambiguator. Two `sw_targets` entries may
 share the same `toolchain` while differing in `linker_fragments` (a
 different memory map) and in a `primitives_override` table (different
 peripheral/resource access) — both already part of the `bsp.toml` schema in
-§5. An optional `[[bsp.cores]]` catalog can additionally list the SoC's
-physical cores (`id`, `arch`, `description`) for introspection, referenced
-from a `sw_target` via `core_id`, when it's useful to query "what cores does
-this SoC have" independent of "what can currently be built for" — this is
-only needed when `name`/`toolchain` alone don't already disambiguate.
+§5.
+
+`sw_targets` alone is enough for lean-bsp's own operations (build, load,
+run, compatibility checking) — it never needs anything more than the target
+list. The optional `[[bsp.cores]]` catalog exists one level up, for two
+things `sw_targets` doesn't do on its own:
+
+- **Avoiding duplicated metadata when the same physical core has more than
+  one `sw_target`.** This isn't limited to AMP — it also happens on a
+  single-core chip that can boot from more than one source. A core that can
+  boot from internal NOR flash or from external QSPI flash needs two
+  `sw_targets` (`core0_nor`, `core0_qspi`: different `linker_fragments`,
+  possibly different `primitives_override` for flash access), but they're
+  still the same physical core with the same `arch`/`description`. A shared
+  `core_id` lets both reference one `[[bsp.cores]]` entry instead of
+  repeating that metadata.
+- **Hardware topology independent of build targets.** `sw_targets` only
+  lists what's currently *buildable*. A board's physical topology can be
+  broader than that — e.g. an SoC with a spare core that has no `sw_target`
+  yet because nothing builds for it today. `[[bsp.cores]]` lets
+  `lean-bsp show-bsp`/`capabilities` describe "this SoC has these physical
+  cores" as its own piece of information, without waiting for every core to
+  gain a corresponding buildable target.
+
+`[[bsp.cores]]` is optional, forward-looking metadata for boards that hit
+one of the two cases above — not something every BSP must populate. RP2350
+doesn't need it (its two `sw_targets` are already fully self-describing by
+architecture alone); the same-arch AMP example and the NOR/QSPI boot-source
+example both do.
 
 Whichever sub-case applies, parking the sibling core(s) remains the chosen
 `sw_target`'s own startup-code responsibility — simply never starting them,
