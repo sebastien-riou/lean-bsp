@@ -243,7 +243,7 @@ because the app never calls the pico-sdk's `multicore_launch_core1()`.
 `crypto-benchmark/hardware-platforms/rp2350.py` already models this at the
 tooling level as one board offering two selectable `sw_targets()`
 (`cortex-m33`, `rv32imcb`). This case is already representable by
-`ARCHITECTURE.md`'s `[[bsp.sw_targets]]` array as defined in §5, since each
+`ARCHITECTURE.md`'s `[[bsp.targets]]` array as defined in §5, since each
 entry carries its own `toolchain`.
 
 The harder case is two cores of the **same** architecture with **different**
@@ -252,31 +252,31 @@ different peripheral or memory maps). Here, `toolchain` alone can't
 disambiguate the targets. Rather than forking into a separate BSP repo per
 core — which would fragment one SoC's board-support code across multiple
 repos and registry entries for no reason other than a naming collision — a
-`sw_target`'s identity should be decoupled from its CPU architecture: its
+`target`'s identity should be decoupled from its CPU architecture: its
 `name` identifies a *physical core / resource set*, and `toolchain` is just
-one of its attributes, not the disambiguator. Two `sw_targets` entries may
+one of its attributes, not the disambiguator. Two `targets` entries may
 share the same `toolchain` while differing in `linker_fragments` (a
 different memory map) and in a `primitives_override` table (different
 peripheral/resource access) — both already part of the `bsp.toml` schema in
 §5.
 
-`sw_targets` alone is enough for lean-bsp's own operations (build, load,
+`targets` alone is enough for lean-bsp's own operations (build, load,
 run, compatibility checking) — it never needs anything more than the target
 list. The optional `[[bsp.cores]]` catalog exists one level up, for two
-things `sw_targets` doesn't do on its own:
+things `targets` doesn't do on its own:
 
 - **Avoiding duplicated metadata when the same physical core has more than
-  one `sw_target`.** This isn't limited to AMP — it also happens on a
+  one `target`.** This isn't limited to AMP — it also happens on a
   single-core chip that can boot from more than one source. A core that can
   boot from internal NOR flash or from external QSPI flash needs two
-  `sw_targets` (`core0_nor`, `core0_qspi`: different `linker_fragments`,
+  `targets` (`core0_nor`, `core0_qspi`: different `linker_fragments`,
   possibly different `primitives_override` for flash access), but they're
   still the same physical core with the same `arch`/`description`. A shared
   `core_id` lets both reference one `[[bsp.cores]]` entry instead of
   repeating that metadata.
-- **Hardware topology independent of build targets.** `sw_targets` only
+- **Hardware topology independent of build targets.** `targets` only
   lists what's currently *buildable*. A board's physical topology can be
-  broader than that — e.g. an SoC with a spare core that has no `sw_target`
+  broader than that — e.g. an SoC with a spare core that has no `target`
   yet because nothing builds for it today. `[[bsp.cores]]` lets
   `lean-bsp show-bsp`/`capabilities` describe "this SoC has these physical
   cores" as its own piece of information, without waiting for every core to
@@ -284,12 +284,12 @@ things `sw_targets` doesn't do on its own:
 
 `[[bsp.cores]]` is optional, forward-looking metadata for boards that hit
 one of the two cases above — not something every BSP must populate. RP2350
-doesn't need it (its two `sw_targets` are already fully self-describing by
+doesn't need it (its two `targets` are already fully self-describing by
 architecture alone); the same-arch AMP example and the NOR/QSPI boot-source
 example both do.
 
 Whichever sub-case applies, parking the sibling core(s) remains the chosen
-`sw_target`'s own startup-code responsibility — simply never starting them,
+`target`'s own startup-code responsibility — simply never starting them,
 exactly as the RP2350 BSP already does by omission. It is not a contract
 primitive `bsp_api.h` needs to define, since concurrent multi-core execution
 is out of scope.
@@ -300,13 +300,13 @@ disambiguated by architecture) and a hypothetical same-arch AMP case
 
 ```toml
 # RP2350: two cores of different architectures, same BSP repo
-[[bsp.sw_targets]]
+[[bsp.targets]]
 name = "cortex-m33"
 toolchain = "arm-none-eabi"
 linker_fragments = ["memory-arm.ld"]
 run_mode = "auto-after-load"
 
-[[bsp.sw_targets]]
+[[bsp.targets]]
 name = "rv32imcb"
 toolchain = "riscv-none-elf"
 linker_fragments = ["memory-riscv.ld"]
@@ -325,23 +325,23 @@ id = "core1"
 arch = "cortex-m33"
 description = "radio core: BLE controller registers, no external flash"
 
-[[bsp.sw_targets]]
+[[bsp.targets]]
 name = "core0-app"
 core_id = "core0"
 toolchain = "arm-none-eabi"
 linker_fragments = ["memory-core0.ld"]
 run_mode = "auto-after-load"
-[bsp.sw_targets.primitives_override]
+[bsp.targets.primitives_override]
 flash_read = true
 flash_write = true
 
-[[bsp.sw_targets]]
+[[bsp.targets]]
 name = "core1-radio"
 core_id = "core1"
 toolchain = "arm-none-eabi"
 linker_fragments = ["memory-core1.ld"]
 run_mode = "auto-after-load"
-[bsp.sw_targets.primitives_override]
+[bsp.targets.primitives_override]
 flash_read = false
 flash_write = false
 ```
@@ -411,13 +411,24 @@ Every BSP exposes:
    | verb | invocation | result (last stdout line, JSON) |
    |---|---|---|
    | `capabilities` | `entry_point capabilities --json` | dynamic capability data, merged by lean-bsp with the static `bsp.toml` |
-   | `build` | `entry_point build --app <path> --sw-target <t> --build-dir <dir> [--linker-script <path>] [--define K=V]*` | `{"status": "ok\|error\|manual", "artifact": {"elf": ..., "bin": ..., "hex": ...}}`, also persisted to `<build-dir>/.lean-bsp/build-result.json` |
-   | `load` | `entry_point load --build-dir <dir> [--sw-target <t>]` | `{"status": "ok\|error\|manual"}` |
-   | `run` | `entry_point run --build-dir <dir> [--sw-target <t>] [--timeout <s>]` | `{"status": "ok\|error\|manual", "exit_code": ...}` |
+   | `build` | `entry_point build --app <path> --target <t> --bdir <dir> [--linker-script <path>] [--define K=V]*` | `{"status": "ok\|error\|manual", "artifact": {"elf": ..., "bin": ..., "hex": ...}}` |
+   | `load` | `entry_point load --bdir <dir> [--target <t>]` | `{"status": "ok\|error\|manual"}` |
+   | `run` | `entry_point run --bdir <dir> [--target <t>] [--timeout <s>]` | `{"status": "ok\|error\|manual", "exit_code": ...}` |
 
    `status: "manual"` formalizes the m5531-style workaround as a first-class
    outcome, not an ad hoc hack, for BSPs whose build/flash step genuinely
    requires a human (a vendor IDE with no headless mode, for instance).
+
+   After a successful build, lean-bsp — not the BSP — writes
+   `<bdir>/.lean-bsp/build-result.json`, recording the artifact paths
+   the BSP returned together with the build's provenance: the BSP's registry
+   name and the local path it resolved to, the `target`, the application
+   path, and the contract version. That makes a build directory fully
+   self-describing, which is what lets `load` and `run` work from
+   `--bdir` alone. Keeping this bookkeeping on lean-bsp's side also
+   spares every BSP author from reimplementing it — a BSP need not even know
+   the registry name it was fetched under. If the recorded BSP path has since
+   moved, lean-bsp re-resolves it from the recorded name.
 
 lean-bsp mandates the *contract* (manifest + subprocess verbs) for every
 BSP, which is what makes arbitrary build systems supportable from day one —
@@ -445,8 +456,8 @@ maintainer = "sebastien.riou@pqshield.com"
 entry_point = "bsp_cli.py"
 
 [bsp.hardware]
-arch = "x86_64"
-cpu = "host"
+arch = "native"                      # linux-host deliberately names no CPU architecture:
+cpu = "native"                       # it builds and runs on whatever machine you are on
 flash_bytes = 0
 ram_bytes = 0
 
@@ -454,7 +465,7 @@ ram_bytes = 0
 backend = "custom"                   # cmake-generic | make | cmsis-toolbox | custom (informational only)
 requires_tools = ["gcc", "make"]     # used by `lean-bsp doctor`
 
-[bsp.primitives]                     # default primitive support; overridable per sw_target
+[bsp.primitives]                     # default primitive support; overridable per target
 uart = true
 led = false
 button = false
@@ -464,23 +475,37 @@ flash_read = false
 flash_erase = false
 flash_write = false
 
-[[bsp.sw_targets]]
-name = "linux-x86_64"
-toolchain = "gcc"                    # or a full triple, e.g. "arm-none-eabi-gcc"
+[[bsp.targets]]
+name = "native"
+toolchain = "gcc"                    # host default compiler; or a full triple for a
+                                      # cross-toolchain, e.g. "arm-none-eabi-gcc"
 linker_fragments = []                # standard-named linker-script include files this target provides
 run_mode = "native-process"          # native-process | auto-after-load | debugger-attach | manual | emulator
 # core_id = "core0"                  # optional: references an entry in [[bsp.cores]], for AMP boards
-                                      # where sw_target identity isn't fully captured by name/toolchain alone
-# [bsp.sw_targets.primitives_override]
-# flash_write = true                 # overrides [bsp.primitives] for this sw_target only
+                                      # where target identity isn't fully captured by name/toolchain alone
+# [bsp.targets.primitives_override]
+# flash_write = true                 # overrides [bsp.primitives] for this target only
 ```
 
-A `sw_target`'s `name` identifies a buildable target — a physical
-core/resource-set on an AMP board, not necessarily a distinct CPU
-architecture — with `toolchain` as just one of its attributes. See §3's
+A `target` here is a build variant the BSP offers — a physical
+core/resource-set on an AMP board, or a boot source on a single-core chip —
+and its `name` identifies it. Note that this is neither of the two things
+"target" usually means elsewhere: it is not an architecture triple (as in
+`cargo build --target`) and not a build-system artifact (as in
+`cmake --build . --target`). The architecture is merely one attribute of a
+target, carried in `toolchain`; the board is named by `--bsp`. See §3's
 "AMP SoCs with multiple cores" for the full rationale and worked examples,
 including the optional `[[bsp.cores]]` catalog that a `core_id` can
 reference.
+
+`linux-host` is the one BSP where the CPU is deliberately left unspecified.
+Its purpose is to build and run an application natively on the developer's
+own machine, so the underlying architecture is whatever that machine
+happens to be — x86-64, Arm, or anything else that runs Linux. It therefore
+declares a single `native` target built with the host's default
+compiler, and neither its manifest nor its registry entry enumerates host
+architectures: there is nothing to choose between, and listing specific
+ones would only imply a portability limit the BSP doesn't have.
 
 `app.toml`, in the application repo root:
 
@@ -489,6 +514,7 @@ reference.
 name = "hello-world"
 lean_bsp_contract_version = "1.0"
 version = "0.1.0"
+default_bsp = "linux-host"           # optional: which BSP to use when --bsp is not given
 
 [app.requires]                       # subset of bsp.primitives this app actually calls
 uart = true
@@ -503,19 +529,40 @@ defines = []
 custom_script = ""                   # optional path to an app-authored top-level .ld
 ```
 
-Compatibility checking (for a chosen `sw_target`): every key set to `true`
+`default_bsp` is a convenience, not a declaration of allegiance: it says
+which BSP to use when the user names none, and nothing more — the
+application remains buildable against any BSP whose primitives satisfy
+`app.requires`. `linux-host` is the natural value for most applications,
+since it is the one BSP that works on any developer's machine, so a fresh
+clone builds and runs with no hardware attached and no options typed. An
+application that is only meaningful on real hardware can of course name that
+board instead, and one that would rather force an explicit choice simply
+omits the key.
+
+A BSP is therefore resolved from the first of: an explicit `--bsp`, the
+`LEAN_BSP_DEFAULT_BSP` environment variable (so an engineer working on one
+board all week can override every app's default once, in their shell), then
+`app.toml`'s `default_bsp`. If none of the three yields a BSP, the command
+fails and lists the BSPs available locally. If the resolved BSP is known to
+the registry but not cloned yet, the error names the exact
+`lbsp fetch <name>` command to run rather than fetching implicitly — a build
+should not reach the network on its own.
+
+Compatibility checking (for a chosen `target`): every key set to `true`
 in `app.requires` must also be `true` in the BSP's effective primitives
-(defaults merged with any per-`sw_target` override), and
+(defaults merged with any per-`target` override), and
 `lean_bsp_contract_version` must match. A mismatch fails fast, listing
 exactly which primitives or version are missing — this is the guard that
 replaces crypto-benchmark's silent divergence between emulated and real
 boards.
 
 lean-bsp itself never generates a linker script or invokes a compiler
-directly: it resolves `--app`/`--bsp`, runs the compatibility check, and
-invokes the BSP's `entry_point build` with the resolved paths (including,
-if the app declares one, `--linker-script <path>`). The BSP's own native
-build system does the actual compiling and linking.
+directly: it resolves `--app`/`--bsp` and the `target` (see below —
+omitting `--target` is fine when the BSP declares only one), runs the
+compatibility check, and invokes the BSP's `entry_point build` with the
+resolved paths (including, if the app declares one,
+`--linker-script <path>`). The BSP's own native build system does the
+actual compiling and linking.
 
 ### CLI surface
 
@@ -525,25 +572,108 @@ lean-bsp show-bsp <name>
 lean-bsp fetch <name> [--ref <tag|branch|sha>] [--dir <path>]
 lean-bsp registry add <url-or-path>
 lean-bsp registry list
-lean-bsp doctor --bsp <name>
-lean-bsp check --app <path> --bsp <name-or-path> --sw-target <t>
-lean-bsp build --app <path> --bsp <name-or-path> --sw-target <t> [--build-dir <dir>] [--define K=V]...
-lean-bsp load  --bsp <name-or-path> --build-dir <dir> [--sw-target <t>]
-lean-bsp run   --bsp <name-or-path> --build-dir <dir> [--sw-target <t>] [--timeout <s>]
-lean-bsp build-load-run --app <path> --bsp <name-or-path> --sw-target <t>   # buildit+flash equivalent
-lean-bsp capabilities --bsp <name-or-path> [--json]
+lean-bsp doctor [--bsp <name>]
+lean-bsp check [--app <path>] [--bsp <name-or-path>] [--target <t>]
+lean-bsp build [--app <path>] [--bsp <name-or-path>] [--target <t>] [--bdir <dir>] [--define K=V]...
+lean-bsp load  [--bdir <dir>] [--app <path>] [--bsp <name-or-path>] [--target <t>]
+lean-bsp run   [--bdir <dir>] [--app <path>] [--bsp <name-or-path>] [--target <t>] [--timeout <s>]
+lean-bsp build-load-run [--app <path>] [--bsp <name-or-path>] [--target <t>] [--bdir <dir>] [--define K=V]...
+lean-bsp load-run [--bdir <dir>] [--app <path>] [--bsp <name-or-path>] [--target <t>] [--timeout <s>]
+lean-bsp capabilities [--bsp <name-or-path>] [--json]
 ```
+
+Every one of these also answers to `lbsp`, a second console script for the
+same entry point (see Packaging below), so `lbsp build --app ../lean-app-a
+--bsp stm32u5` is the same command as `lean-bsp build ...`.
+
+`--app` is optional, and defaults to the application enclosing the current
+directory: lean-bsp looks for `app.toml` in the working directory and then
+in its ancestors, stopping at the enclosing git repository — the same search
+`git`, `cargo` and `npm` do for their own root files. That makes the
+everyday workflow free of redundant paths:
+
+```
+git clone .../lean-app-hello-world && cd lean-app-hello-world
+pipenv install .
+pipenv run lbsp build        # app from the current directory, BSP from app.toml's default_bsp
+pipenv run lbsp load-run     # → prints "hello world" on the developer's own machine
+pipenv run lbsp build-load-run --bsp stm32u5      # same app, real hardware, one option
+```
+
+Two rules keep this default from ever guessing wrong. It never falls back to
+a directory that has no `app.toml`: when the search finds none, the command
+fails saying so, rather than proceeding with something unintended. And it
+never displaces an explicit address — `--bdir` alone still names a build
+directly, so `lbsp run --bdir <dir>` issued from inside an unrelated
+application operates on the directory given, not on the enclosing app.
+
+The `pipenv install .` step above implies the application repo carries a
+small `pyproject.toml` of its own whose only dependency is `lean-bsp` — a
+convenient way for an application to pin the tool version it is known to
+build with. That is optional: a globally installed lean-bsp works the same.
+
+`--target` is optional everywhere. When a BSP declares exactly one
+`target` — the common case: a single-CPU MCU that always boots from
+internal flash — lean-bsp resolves it automatically and the user never has
+to name the only thing there is to choose. When a BSP declares more than
+one, omitting `--target` is an error that lists the available targets
+rather than guessing: silently picking the wrong core or the wrong boot
+source would be worse than failing up front. Either way lean-bsp passes the
+*resolved* target explicitly to the BSP's entry point, so the adapter
+contract above never has to handle an unspecified target.
+
+`--bdir` is optional too, and defaults to
+`<app-dir>/build/<bsp>/<target>`. All three components matter: build
+output belongs to the application (matching the legacy convention, where
+cm-trace built into `cm-trace/build/<cpu>/`), one application may be built
+for several BSPs, and one BSP may offer several targets. Keying the default
+on the full `(app, bsp, target)` triple means independent builds never
+clobber each other, so this sequence needs exactly two builds and no
+rebuilds:
+
+```
+lean-bsp build --app ../lean-app-a --bsp stm32u5      # → ../lean-app-a/build/stm32u5/cortex-m33
+lean-bsp build --app ../lean-app-b --bsp stm32u5      # → ../lean-app-b/build/stm32u5/cortex-m33
+lean-bsp load-run --app ../lean-app-a --bsp stm32u5   # reuses app A's build
+lean-bsp load-run --app ../lean-app-b --bsp stm32u5   # reuses app B's build
+```
+
+The two composite commands differ in exactly this respect, and their names
+say which is which. `build-load-run` always builds — it is the
+`buildit && flash` equivalent, and a fresh build every time is the point.
+`load-run` is the counterpart for alternating between existing builds, as
+above: it uses whatever build is already in the directory and builds only if
+there is none. Given `--bdir` alone, `load-run` requires an existing
+build, since a bare directory carries no application or BSP to build from.
+
+`load`, `run` and `load-run` all accept the same two ways of naming a build,
+neither of which requires remembering a path or repeating an option:
+
+- app + BSP (plus `--target` only for a multi-target BSP) — re-derives the
+  same directory `build` used. Both halves resolve on their own: the app
+  from `--app` or the current directory, the BSP from `--bsp`,
+  `LEAN_BSP_DEFAULT_BSP` or `app.toml`. From inside an application whose
+  `default_bsp` is the one you want, `lbsp load-run` is the whole command.
+- `--bdir <dir>` alone — since `build-result.json` records the BSP, the
+  target and the artifact, the directory identifies itself and nothing else
+  need be given, not even `--bsp`.
+
+An explicit `--bdir` is also how you step outside the default layout
+entirely, for a read-only app checkout or a CI scratch area.
 
 Example session:
 
 ```
 lean-bsp fetch linux-host
-lean-bsp build --app ../lean-app-hello-world --bsp linux-host --sw-target linux-x86_64
-lean-bsp run --bsp linux-host --build-dir build/linux-x86_64
+lean-bsp build --app ../lean-app-hello-world --bsp linux-host   # one target: nothing to choose
+lean-bsp run   --app ../lean-app-hello-world --bsp linux-host   # same app+bsp → same build dir
 
 lean-bsp fetch stm32u5 --ref v1.2.0
-lean-bsp build --app ../lean-app-hello-world --bsp stm32u5 --sw-target cortex-m33 --build-dir build/stm32u5
-lean-bsp load --bsp stm32u5 --build-dir build/stm32u5
+lean-bsp build --app ../lean-app-hello-world --bsp stm32u5      # single CPU, boots from internal flash
+lean-bsp load  --app ../lean-app-hello-world --bsp stm32u5
+
+# rp2350 offers both an Arm and a RISC-V target, so the choice must be explicit
+lean-bsp build --app ../lean-app-hello-world --bsp rp2350 --target rv32imcb
 ```
 
 ### Registry and fetch
@@ -555,7 +685,7 @@ A built-in registry ships as package data, `leanbsp/data/registry.toml`:
 name = "linux-host"
 git = "https://github.com/sebastien-riou/lean-bsp-linux-host.git"
 description = "Run/debug apps as a native Linux process; day-1 cross-platform target"
-tags = ["host", "x86_64", "aarch64"]
+tags = ["host", "linux", "native"]
 
 [[bsp]]
 name = "stm32u5"
@@ -592,9 +722,26 @@ something lean-bsp's design can paper over.
 
 lean-bsp's own Python package follows the same convention already used by
 `lean-com` and `lean-init`: `hatchling` + `hatch-vcs` as the build backend
-(version derived from git tags), a `[project.scripts] lean-bsp =
-"leanbsp.cli:main"` entry point, and the same ruff/black/mypy configuration
-block. `requires-python >= 3.11` is chosen specifically so the standard
+(version derived from git tags), console-script entry points, and the same
+ruff/black/mypy configuration block. Two entry points are declared, so the
+tool answers to a short name as well as the canonical one:
+
+```toml
+[project.scripts]
+lean-bsp = "leanbsp.cli:main"
+lbsp     = "leanbsp.cli:main"
+```
+
+Both are real console scripts generated at install time, not shell aliases:
+they work identically in scripts, Makefiles, CI and non-interactive shells,
+on every platform, with no per-user shell configuration. `lean-bsp` stays
+the canonical name used throughout this document and in the registry, and
+`lbsp` is the equivalent short form for typing by hand — every command below
+accepts either spelling. The only caveat is the usual one for short binary
+names: if another installed package also ships an `lbsp` script, whichever
+comes first on `PATH` wins.
+
+`requires-python >= 3.11` is chosen specifically so the standard
 library's `tomllib` can parse every manifest and registry file with zero
 third-party TOML dependency; git fetch and BSP-adapter invocation both go
 through the standard library's `subprocess`; the CLI itself is built on
