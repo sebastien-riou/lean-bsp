@@ -2,8 +2,11 @@
 
 This document turns the concept in [README.md](README.md) into a concrete,
 implementable design. It is grounded in a close reading of the three legacy
-project families under `legacy-repos/` (`cm-trace`, `crypto-benchmark`,
-`lean-ftl`), which all share the pattern described in [CLAUDE.md](CLAUDE.md):
+project families, whose repos sit next to this one as siblings — the core
+repos `../cm-trace`, `../crypto-benchmark` and `../lean-ftl`, and their
+per-board BSP repos named `<project>-<board>` (e.g. `../cm-trace-stm32f207`,
+`../crypto-benchmark-rp2350`). They all share the pattern described in
+[CLAUDE.md](CLAUDE.md):
 a generic core library buildable for several CPU types, plus project-specific
 BSP repos (one per board) that implement the missing hardware functions and
 own the startup file and `main()`. That pattern scales across boards but not
@@ -33,12 +36,20 @@ has a known failure mode:
   link-order semantics — whether a board's own definition wins depends on
   object file ordering, not on the interface. This is fragile and easy to
   get wrong.
-- **crypto-benchmark** declares its board functions (`init`, `com_tx`,
-  `com_rx`, `delay_ms`, `led1`, `button`, `LBMK_get_cpu_timestamp`) as plain
-  `extern`, with a "default" implementation that exists only for
-  Renode-emulation CPU targets (`target/<cpu>/hal.c`). Real boards
-  reimplement `main.c` from scratch with nothing shared to diverge from —
-  the emulated and real behavior can silently disagree.
+- **crypto-benchmark** declares the board functions its core library needs
+  (`com_tx`, `com_rx`, plus lean-benchmark's `LBMK_get_cpu_timestamp`,
+  `LBMK_init_heap_usage` and `LBMK_get_heap_usage`) as plain `extern`.
+  Default implementations exist only for the emulated and host targets
+  (`target/<cpu>/` for the Renode CPUs, `target/linux/`), alongside a test
+  harness (`test/source/main.c`) that adds `init`, `led1`, `button` and
+  `delay_ms`. Each real board reimplements its share in its own `main.c`,
+  and nothing checks that the two sides agree. They already don't:
+  `lean-benchmark.h` declares `uint64_t LBMK_get_cpu_timestamp()`, while
+  `../crypto-benchmark-stm32u5` and `../crypto-benchmark-m5531` define it
+  as returning `uint32_t`. Those BSPs never include the header, so no
+  compiler sees the mismatch, and the cycle counts come out right only
+  because `lbmk.c` truncates `end - start` to 32 bits — the emulated and
+  real behavior can silently disagree.
 - **lean-ftl** wraps its NVM primitives (`nvm_erase`, `nvm_write`,
   `nvm_read`) behind a function-pointer struct, `lftl_ctx_t`, populated by
   the application. This is the most robust of the three because
@@ -53,7 +64,7 @@ for everything:
 | Relationship | Mechanism | Rationale |
 |---|---|---|
 | BSP → app hooks (`app_*`) | weak symbols, default owned by the BSP | Exactly one strong definition can exist per link (one app per BSP build), which is the precondition under which weak override is actually safe. |
-| app → BSP simple primitives (UART, LED, button, cycle count, CPU frequency, delay, reset) | plain strong `extern`, **mandatory** for every conforming BSP | No weak fallback exists on this side, so there's nothing for a real board to silently diverge from (crypto-benchmark's failure mode) and no link-order ambiguity (cm-trace's failure mode). |
+| app → BSP simple primitives (UART, LED, button, cycle count, CPU frequency, delay, reset, cache clear, heap high-water mark) | plain strong `extern`, **mandatory** for every conforming BSP | No weak fallback exists on this side, so there's nothing for a real board to silently diverge from (crypto-benchmark's failure mode) and no link-order ambiguity (cm-trace's failure mode). |
 | app → BSP flash/NVM | function-pointer struct, reusing lean-ftl's proven shape | The one primitive that legitimately needs interchangeable backends and multiple regions; an app can feed a BSP's region list straight into an FTL-style consumer with no new abstraction. |
 
 ### `bsp_api.h`
@@ -88,6 +99,9 @@ uint32_t  bsp_cycle_count(void);
 uint32_t  bsp_cpu_freq_hz(void);
 void      bsp_delay_ms(uint32_t ms);
 void      bsp_reset(void);
+void      bsp_clear_caches(void);        /* invalidate I/D caches and flash prefetch; no-op without caches */
+void      bsp_heap_usage_reset(void);    /* restart heap high-water-mark tracking */
+size_t    bsp_heap_usage(void);          /* heap high-water mark in bytes since the last reset */
 
 /* ---- flash/NVM: function-pointer struct, lean-ftl-compatible shape ---- */
 typedef uint8_t (*bsp_nvm_erase_t)(void *base_address, unsigned n_pages);
@@ -115,6 +129,31 @@ typedef struct {
 
 const bsp_capabilities_t *bsp_get_capabilities(void);
 ```
+
+The last three primitives come straight from the legacy projects. Both
+cm-trace (`cmtrace_clear_caches`) and crypto-benchmark (lean-benchmark's
+`LBMK_clear_caches`) need the board to flush its caches before a measured
+run; on `../crypto-benchmark-stm32u5` that means invalidating ICACHE and
+DCACHE and toggling the flash prefetch buffer — silicon knowledge that
+belongs in the BSP. crypto-benchmark also reports peak heap usage through
+`LBMK_init_heap_usage`/`LBMK_get_heap_usage`, which each of its BSPs
+implements inside its own `_sbrk` (`Core/Src/sysmem.c` on stm32u5). In
+lean-bsp the BSP owns `_sbrk` along with the startup file and linker script,
+so it owns the high-water mark too.
+
+When an application's code was written against another library's hook
+names, the application — not the BSP — carries a one-line shim in a file
+that includes both headers:
+
+```c
+#include <lean-benchmark/lean-benchmark.h>
+#include "bsp_api.h"
+uint64_t LBMK_get_cpu_timestamp(void) { return bsp_cycle_count(); }
+```
+
+That placement is what rules out the return-type mismatch described above:
+the shim sees lean-benchmark's prototype, so declaring it with the wrong
+type is a compile error instead of a silent ABI mismatch.
 
 ### The glue sequence
 
@@ -145,7 +184,7 @@ what "recovery" means for that board.
 ## 2. Linker script decomposition
 
 Today each board hand-rolls one linker script (see
-`legacy-repos/cm-trace/cm-trace-stm32f207/STM32F207XX_FLASH.ld`), mixing a
+`../cm-trace-stm32f207/STM32F207XX_FLASH.ld`), mixing a
 board-specific memory map with boilerplate section layout that's identical
 across boards of the same architecture family. lean-bsp splits this into
 standard-named fragment files inside each generic BSP's `linker/` directory:
@@ -204,19 +243,38 @@ itself no longer needs to be CPU-portable the way the legacy core repos
 were; that job now belongs to the BSP.
 
 What does stay shared at the framework level is the *toolchain-family*
-layer, not the CPU layer. `cmake/gcc-arm-none-eabi.cmake` is confirmed
-byte-identical across all three legacy repos, and it carries zero `-mcpu`
-flags — it only sets up compiler/archiver/linker plumbing common to *any*
+layer, not the CPU layer. `cmake/gcc-arm-none-eabi.cmake` is byte-identical
+in `../cm-trace` and `../lean-ftl`; `../crypto-benchmark` carries its own
+copy under `target/`, which has already drifted from the other two (LTO
+flags, `gcc-ar`/`gcc-ranlib`). That drift is exactly the duplication
+problem this design removes. None of the three copies carries an `-mcpu`
+flag: they only set up compiler/archiver/linker plumbing common to *any*
 Cortex-M target. lean-bsp ships one such file per toolchain family
 (arm-none-eabi, riscv-none-elf, host gcc for `lean-bsp-linux-host`), and each
 BSP's own build picks the matching toolchain file and layers its CPU flags,
-startup file, and CMSIS headers on top.
+startup file, and CMSIS headers on top. The CPU flags themselves are declared
+once per target, in `bsp.toml` (`cflags`, §5), so the BSP's own build and an
+application that builds its own library compile with the same flags.
 
 Consequence for applications: an app library must never bake in
 architecture flags of its own and should never need `#ifdef` per CPU for
-ordinary logic — it receives its compiler and flags from whichever BSP
-build is driving the compile. Where an app genuinely needs runtime numbers,
-`bsp_cpu_freq_hz()` and `bsp_get_capabilities()->board_name` cover it.
+ordinary logic — it receives its compiler and flags from the BSP target it
+is built for. What an app may legitimately need is the CPU's *name* at build
+time, to pick prebuilt per-CPU dependencies: crypto-benchmark links
+third-party libraries built separately for each CPU (lean-benchmark,
+pqmicrolib, wolfssl, PQRV, …), selected by CPU name in `link_ext.py`, and
+some exist only for some CPUs (PQRV is RISC-V only). Each target therefore
+declares its `cpu`, and lean-bsp hands it to the application's build (§5).
+Where an app genuinely needs runtime numbers, `bsp_cpu_freq_hz()` and
+`bsp_get_capabilities()->board_name` cover it.
+
+Declaring the flags once matters in practice. Today crypto-benchmark
+compiles its core with its own `target/<cpu>.cmake` flags while each BSP
+compiles the rest of the firmware with its own, and the two already differ:
+the core library linked into the RP2350 RISC-V firmware is built with
+`-march=rv32imc_zbb_zbc_zbs_zbkb_zbkc_zbkx_zicsr`, while pico-sdk builds the
+firmware around it with `-march=rv32imac_zicsr_zifencei_zba_zbb_zbs_zbkb`.
+Nothing checks that such pairs are compatible.
 
 ### AMP SoCs with multiple cores
 
@@ -230,7 +288,7 @@ left in its low-power/parked boot state. Concurrent multi-core execution
 inter-core coordination that implies) is out of scope.
 
 This is already how the RP2350 is handled today, confirmed in
-`legacy-repos/crypto-benchmark/crypto-benchmark-rp2350/`. That chip has 2
+`../crypto-benchmark-rp2350/`. That chip has 2
 Cortex-M33 and 2 RV32IMC (Hazard3) cores, of which only one pair — and
 within it, only one core — is ever active for this project. A single BSP
 repo covers both architectures: its `buildit` script maps a CLI argument to
@@ -240,22 +298,23 @@ pico-sdk variables (`rv32imcb` → `PICO_PLATFORM=rp2350-riscv`,
 per target rather than building both in one tree. No code explicitly parks
 or disables the sibling core — it simply stays in its boot-time reset state
 because the app never calls the pico-sdk's `multicore_launch_core1()`.
-`crypto-benchmark/hardware-platforms/rp2350.py` already models this at the
+`../crypto-benchmark/hardware-platforms/rp2350.py` already models this at the
 tooling level as one board offering two selectable `sw_targets()`
-(`cortex-m33`, `rv32imcb`). This case is already representable by
-`ARCHITECTURE.md`'s `[[bsp.targets]]` array as defined in §5, since each
-entry carries its own `toolchain`.
+(`cortex-m33`, `rv32imcb`). This case maps directly onto the
+`[[bsp.targets]]` array defined in §5, since each entry carries its own
+`toolchain`, `cpu` and `cflags`.
 
 The harder case is two cores of the **same** architecture with **different**
 resource access (e.g. two Cortex-M33 cores where core 0 and core 1 see
-different peripheral or memory maps). Here, `toolchain` alone can't
+different peripheral or memory maps). Here, `toolchain` and `cpu` can't
 disambiguate the targets. Rather than forking into a separate BSP repo per
 core — which would fragment one SoC's board-support code across multiple
 repos and registry entries for no reason other than a naming collision — a
 `target`'s identity should be decoupled from its CPU architecture: its
-`name` identifies a *physical core / resource set*, and `toolchain` is just
-one of its attributes, not the disambiguator. Two `targets` entries may
-share the same `toolchain` while differing in `linker_fragments` (a
+`name` identifies a *physical core / resource set*, and `toolchain` and
+`cpu` are just attributes of it, not the disambiguator. Two `targets`
+entries may share the same `toolchain` and `cpu` while differing in
+`linker_fragments` (a
 different memory map) and in a `primitives_override` table (different
 peripheral/resource access) — both already part of the `bsp.toml` schema in
 §5.
@@ -271,9 +330,9 @@ things `targets` doesn't do on its own:
   boot from internal NOR flash or from external QSPI flash needs two
   `targets` (`core0_nor`, `core0_qspi`: different `linker_fragments`,
   possibly different `primitives_override` for flash access), but they're
-  still the same physical core with the same `arch`/`description`. A shared
-  `core_id` lets both reference one `[[bsp.cores]]` entry instead of
-  repeating that metadata.
+  still the same physical core with the same `cpu`, `cflags` and
+  `description`. A shared `core_id` lets both reference one `[[bsp.cores]]`
+  entry and inherit those from it, instead of repeating that metadata.
 - **Hardware topology independent of build targets.** `targets` only
   lists what's currently *buildable*. A board's physical topology can be
   broader than that — e.g. an SoC with a spare core that has no `target`
@@ -284,8 +343,8 @@ things `targets` doesn't do on its own:
 
 `[[bsp.cores]]` is optional, forward-looking metadata for boards that hit
 one of the two cases above — not something every BSP must populate. RP2350
-doesn't need it (its two `targets` are already fully self-describing by
-architecture alone); the same-arch AMP example and the NOR/QSPI boot-source
+doesn't need it (its two `targets` are already fully self-describing, each
+with its own `cpu`); the same-arch AMP example and the NOR/QSPI boot-source
 example both do.
 
 Whichever sub-case applies, parking the sibling core(s) remains the chosen
@@ -300,15 +359,20 @@ disambiguated by architecture) and a hypothetical same-arch AMP case
 
 ```toml
 # RP2350: two cores of different architectures, same BSP repo
+# (cflags as pico-sdk's own toolchain files set them)
 [[bsp.targets]]
 name = "cortex-m33"
+cpu = "cortex-m33"
 toolchain = "arm-none-eabi"
+cflags = ["-mcpu=cortex-m33", "-mthumb", "-march=armv8-m.main+fp+dsp"]
 linker_fragments = ["memory-arm.ld"]
 run_mode = "auto-after-load"
 
 [[bsp.targets]]
 name = "rv32imcb"
+cpu = "rv32imcb"                     # the name apps already use for this core's prebuilt libraries
 toolchain = "riscv-none-elf"
+cflags = ["-march=rv32imac_zicsr_zifencei_zba_zbb_zbs_zbkb", "-mabi=ilp32"]
 linker_fragments = ["memory-riscv.ld"]
 run_mode = "auto-after-load"
 ```
@@ -317,17 +381,19 @@ run_mode = "auto-after-load"
 # Hypothetical SoC: two same-architecture cores with different resources
 [[bsp.cores]]
 id = "core0"
-arch = "cortex-m33"
+cpu = "cortex-m33"
+cflags = ["-mcpu=cortex-m33", "-mthumb"]
 description = "application core: full peripheral set, external flash"
 
 [[bsp.cores]]
 id = "core1"
-arch = "cortex-m33"
+cpu = "cortex-m33"
+cflags = ["-mcpu=cortex-m33", "-mthumb"]
 description = "radio core: BLE controller registers, no external flash"
 
 [[bsp.targets]]
 name = "core0-app"
-core_id = "core0"
+core_id = "core0"                    # cpu and cflags inherited from the core
 toolchain = "arm-none-eabi"
 linker_fragments = ["memory-core0.ld"]
 run_mode = "auto-after-load"
@@ -352,7 +418,7 @@ This contract is designed to survive being dropped into a silicon vendor's
 generated project almost verbatim, which the README requires ("BSP can be
 based on Silicon vendors code generator" / "application can be opened with
 Silicon vendor tools and debugged as such"). Confirmed against the real
-generated files in `cm-trace-stm32f207`:
+generated files in `../cm-trace-stm32f207`:
 
 - CubeMX wraps customization in `/* USER CODE BEGIN n */ ... /* USER CODE
   END n */` markers and preserves them verbatim across regeneration. The
@@ -381,9 +447,11 @@ The contract itself is pure C — one header plus a handful of `.c`/`.ld`
 files — with no build-system dependency baked in (unlike lean-ftl's
 `LFTL_ACCESSORS` CMake-variable selection, which forces a specific build
 system). That means it plugs unchanged into every BSP build system already
-observed across the legacy repos: plain STM32CubeIDE-generated Makefiles,
-CMake + vendor SDK (Raspberry Pi Pico SDK), and Arm CMSIS-Toolbox
-csolution/cproject YAML — without lean-bsp needing to pick a winner.
+observed across the legacy repos: plain STM32CubeMX-generated Makefiles,
+CMake + vendor SDK (Raspberry Pi Pico SDK), and a hand-written Makefile
+over CMSIS-Toolbox packs (`../crypto-benchmark-m5531`, which still keeps its
+csolution/cproject YAML alongside) — without lean-bsp needing to pick a
+winner.
 
 ## 5. The Python CLI, BSP adapter contract, and registry
 
@@ -391,12 +459,13 @@ csolution/cproject YAML — without lean-bsp needing to pick a winner.
 
 lean-bsp never imports a BSP's Python code in-process, and it never mandates
 a shared build backend. This generalizes the closest existing prior art —
-`legacy-repos/crypto-benchmark/crypto-benchmark/hardware-platforms/{stm32u5,rp2350,m5531}.py`,
+`../crypto-benchmark/hardware-platforms/{stm32u5,rp2350,m5531}.py`,
 where each board already exposes `sw_targets()`/`build_cmd()`/`load_cmd()`/`run_cmd()`
 functions that *describe* a subprocess command rather than running vendor
-logic in-process, and where the m5531 helper's `run_cmd()` already falls
-back to `input("Start the firmware manually ... then press ENTER")` for a
-board with no scriptable flashing.
+logic in-process. The m5531 helper's `run_cmd()` still carries, commented
+out since its `./run` script became scriptable, an
+`input("Start the firmware manually ... then press ENTER")` fallback from
+when that board's run step needed a human.
 
 Every BSP exposes:
 
@@ -411,19 +480,44 @@ Every BSP exposes:
    | verb | invocation | result (last stdout line, JSON) |
    |---|---|---|
    | `capabilities` | `entry_point capabilities --json` | dynamic capability data, merged by lean-bsp with the static `bsp.toml` |
-   | `build` | `entry_point build --app <path> --target <t> --bdir <dir> [--linker-script <path>] [--define K=V]*` | `{"status": "ok\|error\|manual", "artifact": {"elf": ..., "bin": ..., "hex": ...}}` |
+   | `build` | `entry_point build --app <path> --target <t> --bdir <dir> [--app-lib <path>] [--linker-script <path>] [--define K=V]*` | `{"status": "ok\|error\|manual", "artifact": {"elf": ..., "bin": ..., "hex": ...}}` |
    | `load` | `entry_point load --bdir <dir> [--target <t>]` | `{"status": "ok\|error\|manual"}` |
-   | `run` | `entry_point run --bdir <dir> [--target <t>] [--timeout <s>]` | `{"status": "ok\|error\|manual", "exit_code": ...}` |
+   | `run` | `entry_point run --bdir <dir> [--target <t>] [--detach] [--timeout <s>]` | `{"status": "ok\|error\|manual", "com_device": ..., "exit_code": ...}` |
 
-   `status: "manual"` formalizes the m5531-style workaround as a first-class
+   `status: "manual"` formalizes that m5531-style workaround as a first-class
    outcome, not an ad hoc hack, for BSPs whose build/flash step genuinely
    requires a human (a vendor IDE with no headless mode, for instance).
+
+   `run` starts the firmware from reset. On a board it returns as soon as
+   the firmware is running: there is no general way to observe a bare-metal
+   `app_main` returning, so `exit_code` is `null` there. Only where
+   completion is observable — `run_mode` `native-process` or `emulator` —
+   does `run` wait for the app to exit, forwarding its output and reporting
+   `exit_code`; `--detach` makes it return as soon as the app is running
+   instead, like a board. `--timeout <s>` bounds that wait and defaults to
+   none (`-1` also means wait forever), so a debugger can sit on a
+   breakpoint indefinitely.
+
+   `com_device` is the path a host-side tool opens to talk to the app's
+   UART 0: a USB serial device on a board, a pseudo-terminal on
+   `linux-host` (crypto-benchmark's own linux target already opens one
+   through `/dev/ptmx` and prints its name), or `null` when nothing is
+   reachable. Finding it is the BSP's job, as each crypto-benchmark BSP's
+   `find-uart` script already does. `run` reports it rather than `load`,
+   because a board whose USB serial port is provided by the MCU itself
+   re-enumerates on every reset. A host-side tool connects only after `run`
+   has returned: `load` may already have started an instance, and on the
+   m5531 that instance boots while the debugger is still detaching, so its
+   cycle counter reads zero (see the comment in
+   `../crypto-benchmark/benchmark.py`). lean-bsp's own `run` and composite
+   commands end their output with the BSP's JSON result line, so a
+   host-side tool can script against `com_device` directly.
 
    After a successful build, lean-bsp — not the BSP — writes
    `<bdir>/.lean-bsp/build-result.json`, recording the artifact paths
    the BSP returned together with the build's provenance: the BSP's registry
    name and the local path it resolved to, the `target`, the application
-   path, and the contract version. That makes a build directory fully
+   path, the `--define` values, and the contract version. That makes a build directory fully
    self-describing, which is what lets `load` and `run` work from
    `--bdir` alone. Keeping this bookkeeping on lean-bsp's side also
    spares every BSP author from reimplementing it — a BSP need not even know
@@ -456,8 +550,6 @@ maintainer = "sebastien.riou@pqshield.com"
 entry_point = "bsp_cli.py"
 
 [bsp.hardware]
-arch = "native"                      # linux-host deliberately names no CPU architecture:
-cpu = "native"                       # it builds and runs on whatever machine you are on
 flash_bytes = 0
 ram_bytes = 0
 
@@ -465,24 +557,35 @@ ram_bytes = 0
 backend = "custom"                   # cmake-generic | make | cmsis-toolbox | custom (informational only)
 requires_tools = ["gcc", "make"]     # used by `lean-bsp doctor`
 
+[bsp.setup]
+steps = []                           # idempotent commands `lean-bsp fetch` runs from the BSP root,
+                                     # e.g. ["./setup-pico-sdk", "./setup-picotool"] for rp2350
+
 [bsp.primitives]                     # default primitive support; overridable per target
 uart = true
 led = false
 button = false
 cpu_cycle_counter = true
 cpu_frequency = true
+cache_clear = false
+heap_usage = true
 flash_read = false
 flash_erase = false
 flash_write = false
 
 [[bsp.targets]]
 name = "native"
+cpu = "native"                       # linux-host deliberately names no CPU architecture:
+                                     # it builds and runs on whatever machine you are on
 toolchain = "gcc"                    # host default compiler; or a full triple for a
-                                      # cross-toolchain, e.g. "arm-none-eabi-gcc"
+                                     # cross-toolchain, e.g. "arm-none-eabi-gcc"
+cflags = []                          # CPU/ABI flags for every object linked into this target,
+                                     # the application's own library included
 linker_fragments = []                # standard-named linker-script include files this target provides
 run_mode = "native-process"          # native-process | auto-after-load | debugger-attach | manual | emulator
 # core_id = "core0"                  # optional: references an entry in [[bsp.cores]], for AMP boards
-                                      # where target identity isn't fully captured by name/toolchain alone
+                                     # where target identity isn't fully captured by name/cpu alone;
+                                     # the target then inherits cpu and cflags from that core
 # [bsp.targets.primitives_override]
 # flash_write = true                 # overrides [bsp.primitives] for this target only
 ```
@@ -492,8 +595,11 @@ core/resource-set on an AMP board, or a boot source on a single-core chip —
 and its `name` identifies it. Note that this is neither of the two things
 "target" usually means elsewhere: it is not an architecture triple (as in
 `cargo build --target`) and not a build-system artifact (as in
-`cmake --build . --target`). The architecture is merely one attribute of a
-target, carried in `toolchain`; the board is named by `--bsp`. See §3's
+`cmake --build . --target`). The CPU is merely one attribute of a target,
+carried in `cpu`, alongside its compiler flags (`cflags`) and compiler
+family (`toolchain`); the board is named by `--bsp`. Those three are
+per-target rather than per-BSP because one board can offer several CPUs —
+the RP2350 offers two. See §3's
 "AMP SoCs with multiple cores" for the full rationale and worked examples,
 including the optional `[[bsp.cores]]` catalog that a `core_id` can
 reference.
@@ -502,10 +608,11 @@ reference.
 Its purpose is to build and run an application natively on the developer's
 own machine, so the underlying architecture is whatever that machine
 happens to be — x86-64, Arm, or anything else that runs Linux. It therefore
-declares a single `native` target built with the host's default
-compiler, and neither its manifest nor its registry entry enumerates host
-architectures: there is nothing to choose between, and listing specific
-ones would only imply a portability limit the BSP doesn't have.
+declares a single `native` target (`cpu = "native"`, no `cflags`) built with
+the host's default compiler, and neither its manifest nor its registry entry
+enumerates host architectures: there is nothing to choose between, and
+listing specific ones would only imply a portability limit the BSP doesn't
+have.
 
 `app.toml`, in the application repo root:
 
@@ -520,10 +627,13 @@ default_bsp = "linux-host"           # optional: which BSP to use when --bsp is 
 uart = true
 cpu_cycle_counter = false
 
-[app.sources]
+[app.sources]                        # the BSP's build compiles these files itself
 files = ["app_main.c"]
 include_dirs = ["."]
 defines = []
+
+# [app.build]                        # alternative to [app.sources]: the app builds its own
+# command = ["./lean-bsp-build"]     # static library (see below)
 
 [app.linker]
 custom_script = ""                   # optional path to an app-authored top-level .ld
@@ -564,6 +674,31 @@ resolved paths (including, if the app declares one,
 `--linker-script <path>`). The BSP's own native build system does the
 actual compiling and linking.
 
+That covers an application small enough to be a list of sources. An
+application with a build of its own declares `[app.build]` instead —
+crypto-benchmark, for instance, is a CMake project parameterized by
+`CRYPTO_LIB`, `ALGO`, `PSET` and `GOAL` that links prebuilt per-CPU
+third-party libraries. lean-bsp runs its `command` from the application
+root before invoking the BSP, passing each `--define K=V` as a trailing
+`K=V` argument (in this mode the defines go to the application's command,
+not to the BSP) and setting:
+
+| variable | value |
+|---|---|
+| `LEAN_BSP_CPU`, `LEAN_BSP_TOOLCHAIN` | the target's `cpu` and `toolchain` |
+| `LEAN_BSP_CFLAGS` | the target's `cflags`, space-separated |
+| `LEAN_BSP_TOOLCHAIN_FILE` | lean-bsp's toolchain-family CMake file for that `toolchain` (§3) |
+| `LEAN_BSP_APP_LIB` | where to write the static library: `<bdir>/app/libapp.a` |
+
+The command must write that library or fail, and may reject a `cpu` it has
+no dependencies for. lean-bsp then passes the library to `entry_point build`
+as `--app-lib <path>`, and the BSP links it instead of compiling sources.
+lean-bsp still invokes no compiler itself, and the CPU flags still come only
+from the BSP target. This is the shape all three crypto-benchmark BSPs
+already use — each links `../crypto-benchmark/build/<cpu>/libcrypto-benchmark.a`
+— except that the flags now flow from the BSP rather than from
+crypto-benchmark's own `target/<cpu>.cmake`.
+
 ### CLI surface
 
 ```
@@ -576,9 +711,9 @@ lean-bsp doctor [--bsp <name>]
 lean-bsp check [--app <path>] [--bsp <name-or-path>] [--target <t>]
 lean-bsp build [--app <path>] [--bsp <name-or-path>] [--target <t>] [--bdir <dir>] [--define K=V]...
 lean-bsp load  [--bdir <dir>] [--app <path>] [--bsp <name-or-path>] [--target <t>]
-lean-bsp run   [--bdir <dir>] [--app <path>] [--bsp <name-or-path>] [--target <t>] [--timeout <s>]
-lean-bsp build-load-run [--app <path>] [--bsp <name-or-path>] [--target <t>] [--bdir <dir>] [--define K=V]...
-lean-bsp load-run [--bdir <dir>] [--app <path>] [--bsp <name-or-path>] [--target <t>] [--timeout <s>]
+lean-bsp run   [--bdir <dir>] [--app <path>] [--bsp <name-or-path>] [--target <t>] [--detach] [--timeout <s>]
+lean-bsp build-load-run [--app <path>] [--bsp <name-or-path>] [--target <t>] [--bdir <dir>] [--define K=V]... [--detach] [--timeout <s>]
+lean-bsp load-run [--bdir <dir>] [--app <path>] [--bsp <name-or-path>] [--target <t>] [--detach] [--timeout <s>]
 lean-bsp capabilities [--bsp <name-or-path>] [--json]
 ```
 
@@ -627,9 +762,9 @@ contract above never has to handle an unspecified target.
 output belongs to the application (matching the legacy convention, where
 cm-trace built into `cm-trace/build/<cpu>/`), one application may be built
 for several BSPs, and one BSP may offer several targets. Keying the default
-on the full `(app, bsp, target)` triple means independent builds never
-clobber each other, so this sequence needs exactly two builds and no
-rebuilds:
+on the full `(app, bsp, target)` triple means builds of different apps,
+BSPs or targets never clobber each other, so this sequence needs exactly two
+builds and no rebuilds:
 
 ```
 lean-bsp build --app ../lean-app-a --bsp stm32u5      # → ../lean-app-a/build/stm32u5/cortex-m33
@@ -637,6 +772,13 @@ lean-bsp build --app ../lean-app-b --bsp stm32u5      # → ../lean-app-b/build/
 lean-bsp load-run --app ../lean-app-a --bsp stm32u5   # reuses app A's build
 lean-bsp load-run --app ../lean-app-b --bsp stm32u5   # reuses app B's build
 ```
+
+Builds that differ only in their `--define` values do share a directory,
+each replacing the previous one. That suits a loop that builds, loads and
+runs one variant at a time — which is what crypto-benchmark's benchmark
+driver does for each `CRYPTO_LIB`/`ALGO`/`PSET`/`GOAL` combination — and
+`build-result.json` records which defines the current build used. To keep
+several variants side by side, give each its own `--bdir`.
 
 The two composite commands differ in exactly this respect, and their names
 say which is which. `build-load-run` always builds — it is the
@@ -686,10 +828,12 @@ name = "linux-host"
 git = "https://github.com/sebastien-riou/lean-bsp-linux-host.git"
 description = "Run/debug apps as a native Linux process; day-1 cross-platform target"
 tags = ["host", "linux", "native"]
+# no default_ref: fetch tracks the default branch
 
 [[bsp]]
 name = "stm32u5"
 git = "https://gitlab.pqsh.net/leanbsp/lean-bsp-stm32u5.git"
+default_ref = "v1.2.0"               # what fetch checks out when --ref is not given
 description = "ST STM32U5 Nucleo boards"
 tags = ["arm", "cortex-m33"]
 ```
@@ -703,8 +847,22 @@ entry). `lean-bsp fetch <name>` runs a plain
 matching the convention README.md already states and that the existing
 `lean-bsp-linux-host` / `lean-app-hello-world` placeholders already assume —
 via `subprocess` calling the system `git` binary, with no GitPython
-dependency. This is deliberately simpler than lean-ftl's packaged-tarball
-fetch (`get-lean-ftl` / `get-local-lean-ftl`); a `--release <version>`
+dependency. The ref is `--ref` if given, else the entry's `default_ref`,
+else the repo's default branch. After cloning, `fetch` runs the BSP's
+`[bsp.setup] steps` from the clone's root. Fetching a BSP that is already
+cloned skips the clone but still runs those steps — which is why they must
+be idempotent — and warns if the clone has local changes or is not at the
+requested ref, so re-running `fetch` repairs a half-set-up BSP without
+touching work in progress. The closest prior art is crypto-benchmark's own
+`../crypto-benchmark/initial-setup`, driven by
+`../crypto-benchmark/setup_manifest.py`: it already clones each BSP and
+third-party library as a sibling repo (`git clone --depth=1 --branch
+<pinned tag>`), builds https or ssh URLs from a per-host template, flags
+entries that need `gitlab.pqsh.net` access as `internal`, and runs each
+BSP's idempotent setup steps (`./setup-pico-sdk`, `./setup-picotool`,
+`pipenv install`) even when the clone already exists. lean-bsp's fetch is
+also deliberately simpler than lean-ftl's packaged-tarball fetch
+(`get-lean-ftl` / `get-local-lean-ftl`); a `--release <version>`
 variant reusing that idea remains a reasonable future addition for BSPs that
 publish packaged releases, but sibling-repo-as-live-git-clone is the default.
 
@@ -761,8 +919,9 @@ lean-bsp/
     cli.py                  # argparse dispatch for the command surface above
     manifest.py             # tomllib-based loaders/validators for bsp.toml / app.toml
     registry.py             # load + merge built-in and extra registries, name lookup
-    fetch.py                # subprocess git clone/checkout
+    fetch.py                # subprocess git clone/checkout, then the BSP's [bsp.setup] steps
     adapter.py              # subprocess contract: invoke <bsp>/entry_point <verb> ..., parse trailing JSON line
+    appbuild.py             # run app.toml's [app.build] command with the LEAN_BSP_* environment
     compat.py                # primitive / contract-version compatibility checks
     workspace.py              # sibling-directory resolution (../lean-bsp-<name>)
     backends/
@@ -779,9 +938,13 @@ lean-bsp/
 
 ## 6. Migration strategy
 
-### Order: cm-trace → lean-ftl → crypto-benchmark
+### Order: hello-world → cm-trace → lean-ftl → crypto-benchmark
 
-**cm-trace first.** It has only one real BSP (`cm-trace-stm32f207`), and its
+**hello-world** ensure the general flow is convenient enough. Allow to check
+all the boards we will need fit into the BSP pattern. (stm32u5a5, stm32l5, stm32f207, 
+m5531, rp2350-cortex-m33, rp2350-rv32imcb)
+
+**cm-trace** It has only one real BSP (`cm-trace-stm32f207`), and its
 existing override mechanism — weak `cmtrace_com_tx`/`cmtrace_com_rx`/
 `cmtrace_clear_caches`, link-order-based `cmtrace_timer_*` — maps closely
 onto the new contract already, with no CMake-variable inversion to undo and
@@ -792,7 +955,7 @@ problems (turning a "library others link" into a library that owns
 project-specific one) without simultaneously fighting build-system
 pluralism or a packaged-distribution pipeline.
 
-**lean-ftl second.** Its release/dist model
+**lean-ftl** Its release/dist model
 (`get-lean-ftl`/`get-local-lean-ftl` → `lean-ftl-dist/{debug,minSizeRel}`)
 is the closest existing prior art to lean-bsp's fetch mechanism, so porting
 it feeds directly into hardening that part of the design. It also produces
@@ -801,20 +964,27 @@ a real, reusable `lean-bsp-stm32u5` — `crypto-benchmark-stm32u5` and
 files to be the *same physical Nucleo board* (`NUCLEO-U5A5ZJ-Q`), just
 regenerated at two different CubeMX versions (6.16.1 vs 6.11.1) — so this
 migration is the first concrete proof that one generic BSP can serve two
-unrelated applications.
+unrelated applications. Drop support for ch32v307.
 
-**crypto-benchmark last.** It has the most CPUs, the most existing BSPs,
-and the most build-system diversity (a plain STM32CubeIDE Makefile for
-stm32u5, CMake + the Raspberry Pi Pico SDK for rp2350, Arm CMSIS-Toolbox
-csolution/cproject YAML for m5531), plus known-stale state worth flagging
-rather than migrating as-is: `crypto-benchmark-m5531`'s `cproject.yml`
-currently only references `main.c` and vendor CMSIS components, not the
-actual algorithm code, so it reads as an unfinished bring-up skeleton; and
-`crypto-benchmark-stm32u5`'s Makefile still references a static library
-(`../crypto-benchmark/build/cortex-m33/`) that the current core CMake may no
-longer emit. By the time this migration starts, `lean-bsp-stm32u5` already
-exists from the lean-ftl migration, so most of the work is *consuming* an
-already-proven BSP rather than a fresh board bring-up.
+**crypto-benchmark** It has the most CPUs, the most existing BSPs,
+and the most build-system diversity (a plain STM32CubeMX-generated Makefile
+for stm32u5, CMake + the Raspberry Pi Pico SDK for rp2350, a hand-written
+Makefile over CMSIS-Toolbox packs for m5531). Despite that diversity, all
+three BSPs consume the core the same way: they link the per-CPU static
+library the core CMake emits
+(`../crypto-benchmark/build/<cpu>/libcrypto-benchmark.a`, built with LTO
+objects, so each BSP links with `-flto`). That maps directly onto
+`[app.build]` (§5): the existing `buildit` + `link_ext.py` pair becomes the
+application's build command, picking its per-CPU dependencies from
+`LEAN_BSP_CPU` and its flags from `LEAN_BSP_CFLAGS` instead of its own
+`target/<cpu>.cmake`. lean-benchmark's board hooks become one-line
+application-side shims over `bsp_api.h` (`LBMK_get_cpu_timestamp` →
+`bsp_cycle_count`, `LBMK_clear_caches` → `bsp_clear_caches`, the heap hooks →
+`bsp_heap_usage_reset`/`bsp_heap_usage`), and `benchmark.py`'s
+`find-uart` step becomes the `com_device` that `run` reports. By the time
+this migration starts, `lean-bsp-stm32u5` already exists from the lean-ftl
+migration, so most of the work is *consuming* an already-proven BSP rather
+than a fresh board bring-up.
 
 ### What moves where, per repo
 
@@ -831,7 +1001,10 @@ tree, `startup_stm32u5a5xx.s`, the `.ld` memory map, `SystemClock_Config()`
 and related bring-up, and — moved wholesale out of lean-ftl's
 `target/stm32/stm32u5-accessors.c` — the STM32U5 flash-controller
 erase/write sequence, since that's a silicon concern, not an application
-one. Staying application-side: crypto-benchmark's `hw_info[]` instrumentation
+one. Likewise moved out of `crypto-benchmark-stm32u5`: the ICACHE/DCACHE
+invalidation in its `LBMK_clear_caches` (becoming `bsp_clear_caches`) and
+the heap high-water-mark tracking in its `Core/Src/sysmem.c` (becoming
+`bsp_heap_usage`). Staying application-side: crypto-benchmark's `hw_info[]` instrumentation
 array, lean-ftl's `test_callbacks(); test_main();` harness call, and the
 decision of which `lftl_ctx_t` function pointers get registered with what
 region geometry.
@@ -839,7 +1012,8 @@ region geometry.
 Concretely for the `cm-trace-stm32f207` pilot: reusable as-is into
 `lean-bsp-stm32f207` — CMSIS/HAL drivers, `startup_stm32f207xx.s`, the
 linker script, `SystemClock_Config()`/peripheral init, the UART3-based
-`__io_putchar`/`__io_getchar`, the LED on/off calls, and the TIM5-based
+`__io_putchar`/`__io_getchar`, the LED on/off calls, the
+`cmtrace_clear_caches` implementation (becoming `bsp_clear_caches`), and the TIM5-based
 timer implementation that today overrides `dwt.c`'s DWT-based default by
 link order (this becomes the BSP's cycle-counter primitive; the DWT-based
 default itself is a reasonable candidate for a shared "if the BSP doesn't
@@ -856,24 +1030,24 @@ a new `app_main`-based build target is added alongside it in the same repo.
 New boards or projects adopt lean-bsp immediately, with no exceptions, even
 before a given legacy migration is finished. Old BSP repos are retired
 opportunistically, prioritized by which boards already have (or will soon
-gain, per the order above) a generic-BSP replacement — a stale or unfinished
-BSP like `crypto-benchmark-m5531` is a low-cost retirement candidate, since
-there's little working code to preserve. Shared scaffolding files
+gain, per the order above) a generic-BSP replacement. Shared scaffolding files
 (`gcc-arm-none-eabi.cmake`, `git_version.cmake`, and similar) are deleted
 from a legacy repo only after that repo's app-lib build is validated via
 lean-bsp's own tooling — never delete-then-fix.
 
 ### The cm-trace pilot: definition of done
 
-1. `cm-trace` is restructured to expose `app_main()` (wrapping today's
-   `test/source/main.c` trace-loop payload) and to declare its weak-symbol
+1. `cm-trace` is restructured to expose `app_main()` (wrapping the
+   `cmtrace_trace_loop()` payload that `../cm-trace-stm32f207/Core/Src/main.c`
+   invokes today) and to declare its weak-symbol
    needs (`cmtrace_com_tx`/`cmtrace_com_rx`/`cmtrace_clear_caches`,
    `cmtrace_timer_*`) via `app.toml`. The old `libcmtrace` CMake target
    keeps building unmodified during the transition window.
 2. `lean-bsp-stm32f207` is created as a project-agnostic repo: CubeMX
    bring-up, the modular `linker/` fragment set, the four-line `main()`
    glue, `bsp.toml` + `bsp_cli.py`, and implementations of the UART3, LED,
-   TIM5-based cycle-counter, and flash-cache-clear primitives. It contains
+   TIM5-based cycle-counter, and cache-clear (`bsp_clear_caches`)
+   primitives. It contains
    no mention of "cmtrace" anywhere in its source.
 3. `cm-trace-stm32f207` (the old project-specific repo) is retired, replaced
    by `lean-bsp-stm32f207` plus the restructured cm-trace app-lib, built
@@ -905,21 +1079,25 @@ board) and then `crypto-benchmark`.
 - `README.md`, `CLAUDE.md` — the original proposal and problem statement.
 - `../lean-app-hello-world/app_main.c`, `../lean-bsp-linux-host/` — existing
   placeholder siblings this design stays consistent with.
-- `legacy-repos/cm-trace/cm-trace/libcmtrace/include/cmtrace.h`,
-  `.../libcmtrace/source/dwt.c` — the weak/link-order override precedent.
-- `legacy-repos/cm-trace/cm-trace-stm32f207/Core/Src/main.c`,
-  `.../STM32F207XX_FLASH.ld` — the pilot's BSP shape and linker script to
-  decompose.
-- `legacy-repos/lean-ftl/lean-ftl/liblean-ftl/include/lean-ftl.h`,
-  `.../CMakeLists.txt`,
-  `legacy-repos/lean-ftl/lean-ftl/target/stm32/stm32u5-accessors.c` — the
-  NVM function-pointer contract and the `LFTL_ACCESSORS` inversion to fix
-  during the lean-ftl migration.
-- `legacy-repos/crypto-benchmark/crypto-benchmark/hardware-platforms/{stm32u5,rp2350,m5531}.py`,
-  `.../benchmark.py` — the closest existing prior art for the per-BSP Python
-  adapter contract.
-- `legacy-repos/*/cmake/{generic_binary.cmake,git_version.cmake,gcc-arm-none-eabi.cmake}` —
-  confirmed near-identical shared scaffolding to fold into lean-bsp and the
-  generic BSPs.
+- `../cm-trace/libcmtrace/include/cmtrace.h`,
+  `../cm-trace/libcmtrace/source/dwt.c` — the weak/link-order override
+  precedent.
+- `../cm-trace-stm32f207/Core/Src/main.c`,
+  `../cm-trace-stm32f207/STM32F207XX_FLASH.ld` — the pilot's BSP shape and
+  linker script to decompose.
+- `../lean-ftl/liblean-ftl/include/lean-ftl.h`,
+  `../lean-ftl/liblean-ftl/CMakeLists.txt`,
+  `../lean-ftl/target/stm32/stm32u5-accessors.c` — the NVM function-pointer
+  contract and the `LFTL_ACCESSORS` inversion to fix during the lean-ftl
+  migration.
+- `../crypto-benchmark/hardware-platforms/{stm32u5,rp2350,m5531}.py`,
+  `../crypto-benchmark/benchmark.py` — the closest existing prior art for the
+  per-BSP Python adapter contract.
+- `../crypto-benchmark/setup_manifest.py`, `../crypto-benchmark/initial-setup`
+  — the closest existing prior art for the registry and `fetch`.
+- `../{cm-trace,crypto-benchmark,lean-ftl}/cmake/{generic_binary.cmake,git_version.cmake}`,
+  plus `gcc-arm-none-eabi.cmake` (in `cmake/` for cm-trace and lean-ftl, in
+  `target/` for crypto-benchmark) — near-identical shared scaffolding to fold
+  into lean-bsp and the generic BSPs.
 - `../lean-com/pyproject.toml`, `../lean-init/pyproject.toml` — the org's
   packaging convention mirrored by lean-bsp's own `pyproject.toml`.

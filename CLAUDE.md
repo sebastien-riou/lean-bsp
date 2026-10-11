@@ -1,10 +1,10 @@
 # Notes for Claude
 
 ## The problem
-In the local folder `legacy-repos`, there are three projects, one in each sub folder:
-- `cm-trace`
-- `crypto-benchmark`
-- `lean-ftl`
+There are three projects, each made of several git repositories that sit next to this one as siblings:
+- `cm-trace`: core `../cm-trace`, BSP `../cm-trace-stm32f207`
+- `crypto-benchmark`: core `../crypto-benchmark`, BSPs `../crypto-benchmark-m5531`, `../crypto-benchmark-rp2350`, `../crypto-benchmark-stm32u5`
+- `lean-ftl`: core `../lean-ftl`, BSPs `../lean-ftl-stm32l5`, `../lean-ftl-stm32u5` (its ch32v307 BSP is not cloned: support for that board is being dropped)
 
 They are all following the same pattern:
 - A generic repo which contain the core of the project
