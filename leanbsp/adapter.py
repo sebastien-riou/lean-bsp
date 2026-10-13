@@ -16,10 +16,12 @@ def entry_command(bsp: Bsp) -> list[str]:
     entry = bsp.entry_point
     if not entry.is_file():
         raise LeanBspError(f'BSP {bsp.name}: entry point {entry} not found')
+    if entry.suffix == '.py':
+        # lean-bsp's own interpreter, whatever the shebang finds first on PATH: a recent enough
+        # Python, with leanbsp.backends importable for the BSPs that use those helpers
+        return [sys.executable, str(entry)]
     if os.access(entry, os.X_OK):
         return [str(entry)]
-    if entry.suffix == '.py':
-        return [sys.executable, str(entry)]
     raise LeanBspError(f'BSP {bsp.name}: entry point {entry} is not executable')
 
 

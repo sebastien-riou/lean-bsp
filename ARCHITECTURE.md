@@ -499,7 +499,9 @@ Every BSP exposes:
 2. One executable **entry point** (declared in the manifest, e.g.
    `entry_point = "bsp_cli.py"`) that lean-bsp always invokes via
    `subprocess`, answering four verbs. Nothing requires the entry point to
-   be Python — only that some runnable program answers these verbs:
+   be Python — only that some runnable program answers these verbs. A
+   `.py` entry point is run with lean-bsp's own interpreter, whatever its
+   shebang would find, so it can import lean-bsp's helpers (below):
 
    | verb | invocation | result (last stdout line, JSON) |
    |---|---|---|
@@ -576,12 +578,23 @@ BSP, which is what makes arbitrary build systems supportable from day one —
 a legacy vendor Makefile, a CMSIS-Toolbox csolution, or a vendor IDE can all
 be wrapped by a few lines of `entry_point` glue that shells out to `make`,
 `cmake --build`, `cbuild`, or prints the manual-step message. It does **not**
-mandate a specific build tool. For *new* BSPs, lean-bsp ships a reference
-helper module extracted from the confirmed near-identical
-`cmake/generic_binary.cmake` + `cmake/git_version.cmake` + toolchain-file
-scaffold duplicated across all three legacy repos, so a new BSP's entry
-point can call into it in a few lines rather than hand-rolling subprocess
-plumbing — while nothing requires a BSP to use it.
+mandate a specific build tool. For *new* BSPs, lean-bsp ships helper
+modules, `leanbsp.backends`, so a new BSP's entry point can call into them
+in a few lines rather than hand-rolling subprocess plumbing — while nothing
+requires a BSP to use them:
+
+- `board` answers the four verbs around a description of the board (its
+  title, and how to flash and run it by hand) and a build function:
+  results, the build directory's state, and `load`/`run` through
+  lean-hwbridge. All the phase-1 board BSPs are built on it; their
+  `bsp_cli.py` is the board's data plus, for pico2, its CMake step.
+- `gcc` is the plain gcc build four of them share: the BSP's sources and
+  the application's compiled in parallel with the target's `cflags`, linked
+  with one linker script, then the HEX and BIN images. `CROSS_COMPILE`
+  names the toolchain and must match the target's `toolchain` triple.
+- Later: `cmake_generic`, extracted from the confirmed near-identical
+  `cmake/generic_binary.cmake` + `cmake/git_version.cmake` + toolchain-file
+  scaffold duplicated across all three legacy repos.
 
 ### Manifest schemas
 
@@ -987,8 +1000,10 @@ lean-bsp/
     workspace.py            # app.toml discovery, sibling-directory resolution (../lean-bsp-<name>)
     errors.py
     appbuild.py             # later phase: run app.toml's [app.build] command with the LEAN_BSP_* environment
-    backends/
-      cmake_generic.py      # later phase: optional reference helper for new BSPs' entry-point scripts
+    backends/               # optional helpers for BSP entry points
+      board.py              # the four verbs, build-directory state, load/run through lean-hwbridge
+      gcc.py                # a plain gcc build: sources + application, one linker script, HEX and BIN
+      cmake_generic.py      # later phase: the legacy repos' shared CMake scaffold
     data/
       registry.toml         # built-in known-BSP list
       contract/1.0/bsp_api.h  # canonical header, one directory per contract version
