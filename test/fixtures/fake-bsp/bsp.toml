@@ -1,0 +1,20 @@
+[bsp]
+name = "fake"
+lean_bsp_contract_version = "1.0"
+version = "1.2.3"
+description = "Test double: records what lean-bsp asks of it"
+entry_point = "bsp_cli.py"
+
+[bsp.build]
+requires_tools = ["python3"]
+
+[bsp.primitives]
+uart = true
+cpu_cycle_counter = true
+
+[[bsp.targets]]
+name = "only"
+cpu = "fake-cpu"
+toolchain = "none"
+cflags = ["-mfake"]
+run_mode = "auto-after-load"

@@ -1,0 +1,105 @@
+[build-system]
+requires = ["hatchling", "hatch-vcs"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+source = "vcs"
+
+[tool.hatch.build.targets.wheel]
+packages = ["leanbsp"]
+
+[project]
+name = "lean-bsp"
+dynamic = ["version"]
+authors = [
+  { name="Sebastien Riou", email="" },
+]
+description = "Build, load and run applications against generic, reusable board support packages"
+readme = "README.md"
+requires-python = ">=3.11"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: POSIX :: Linux",
+]
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest", "ruff", "black", "mypy"]
+
+[project.urls]
+"Homepage" = "https://github.com/sebastien-riou/lean-bsp"
+"Bug Tracker" = "https://github.com/sebastien-riou/lean-bsp/issues"
+
+[project.scripts]
+lean-bsp = "leanbsp.cli:main"
+lbsp     = "leanbsp.cli:main"
+
+[tool.black]
+target-version = ["py311"]
+line-length = 120
+skip-string-normalization = true
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+lint.select = [
+  "A",
+  "B",
+  "C",
+  "E",
+  "F",
+  "FBT",
+  "I",
+  "N",
+  "Q",
+  "RUF",
+  "S",
+  "T",
+  "UP",
+  "W",
+  "YTT",
+]
+lint.ignore = [
+  # Ignore McCabe complexity
+  "C901",
+  # Allow boolean positional values in function calls, like `dict.get(... True)`
+  "FBT003",
+  # subprocess is the whole point of this tool: BSP entry points and git are run on purpose
+  "S603", "S607",
+  "S101", # Use of `assert` detected
+  "E501", # Line too long
+]
+lint.unfixable = [
+  # Don't touch unused imports
+  "F401",
+]
+exclude = ["docs", "test", "dist"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["leanbsp"]
+
+[tool.ruff.lint.flake8-quotes]
+inline-quotes = "single"
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "all"
+
+[tool.ruff.lint.per-file-ignores]
+# Tests can use relative imports and assertions and print
+"test/**/*" = ["TID252", "S101", "T201"]
+# CLI can print
+"leanbsp/cli.py" = ["T201"]
+
+[tool.mypy]
+disallow_untyped_defs = false
+follow_imports = "normal"
+ignore_missing_imports = true
+pretty = true
+show_column_numbers = true
+show_error_codes = true
+warn_no_return = false
+warn_unused_ignores = true

@@ -70,7 +70,11 @@ for everything:
 ### `bsp_api.h`
 
 This header is shipped by the lean-bsp framework and included by every BSP
-and every application:
+and every application. The canonical copy ships inside the lean-bsp package
+(`leanbsp/data/contract/<version>/bsp_api.h`), and every BSP keeps its own copy at
+`include/bsp_api.h`, so its vendor IDE project builds and debugs without
+lean-bsp installed. `lean-bsp check` fails if a BSP's copy differs from the
+canonical one for its `lean_bsp_contract_version`.
 
 ```c
 #pragma once
@@ -78,12 +82,13 @@ and every application:
 #include <stdbool.h>
 #include <stddef.h>
 
-/* ---- BSP -> app hooks: weak, BSP-owned defaults ---- */
-int  app_main(void);                                          /* required, strong, app-defined */
-void app_init(void)                        __attribute__((weak));   /* one-time, IRQs still masked */
-void app_tick(uint32_t tick_ms)            __attribute__((weak));   /* called from BSP tick ISR */
-void app_on_fault(uint32_t reason, uintptr_t pc) __attribute__((weak));
-void app_on_exit(int code)                 __attribute__((weak));   /* app_main returned */
+/* ---- BSP -> app hooks: app_main required; weak do-nothing defaults for the
+ * others live in the BSP's sources, not here (see below) ---- */
+int  app_main(void);
+void app_init(void);                              /* one-time, IRQs still masked */
+void app_tick(uint32_t tick_ms);                  /* called from the BSP tick ISR, every millisecond */
+void app_on_fault(uint32_t reason, uintptr_t pc); /* last chance before the BSP's terminal action */
+void app_on_exit(int code);                       /* app_main returned code */
 
 enum {
     APP_FAULT_HARD = 0, APP_FAULT_ASSERT, APP_FAULT_STACK_OVERFLOW,
@@ -101,7 +106,7 @@ void      bsp_delay_ms(uint32_t ms);
 void      bsp_reset(void);
 void      bsp_clear_caches(void);        /* invalidate I/D caches and flash prefetch; no-op without caches */
 void      bsp_heap_usage_reset(void);    /* restart heap high-water-mark tracking */
-size_t    bsp_heap_usage(void);          /* heap high-water mark in bytes since the last reset */
+size_t    bsp_heap_usage(void);          /* growth of the heap high-water mark since the last reset, in bytes */
 
 /* ---- flash/NVM: function-pointer struct, lean-ftl-compatible shape ---- */
 typedef uint8_t (*bsp_nvm_erase_t)(void *base_address, unsigned n_pages);
@@ -130,6 +135,13 @@ typedef struct {
 const bsp_capabilities_t *bsp_get_capabilities(void);
 ```
 
+The hooks are declared without `__attribute__((weak))` on purpose. GCC
+carries a weak declaration over to any definition in the same translation
+unit, so an application that includes this header and defines `app_init`
+would get a weak definition too; with two weak definitions, link order
+picks the winner — cm-trace's failure mode. The BSP marks only its own
+default definitions weak.
+
 The last three primitives come straight from the legacy projects. Both
 cm-trace (`cmtrace_clear_caches`) and crypto-benchmark (lean-benchmark's
 `LBMK_clear_caches`) need the board to flush its caches before a measured
@@ -155,6 +167,13 @@ That placement is what rules out the return-type mismatch described above:
 the shim sees lean-benchmark's prototype, so declaring it with the wrong
 type is a compile error instead of a silent ABI mismatch.
 
+Standard output and input are UART 0 on every BSP: the BSP routes `printf`
+and friends through `bsp_uart_tx(0, ...)` and `bsp_uart_rx(0, ...)` (newlib's
+`_write`/`_read` on bare metal), so an application can use either and get
+the same bytes on the same wire. On `linux-host`, UART 0 is the process's
+own stdin/stdout when `run` waits for it, and a pseudo-terminal reported as
+`com_device` when it runs with `--detach` (§5).
+
 ### The glue sequence
 
 The entire contract surface inside `main()` is four lines, owned by the BSP:
@@ -168,12 +187,17 @@ int main(void) {
     app_init();                 /* weak; IRQs still masked here, deterministic ordering */
     __enable_irq();
     int rc = app_main();
-    app_on_exit(rc);             /* weak default: bsp_reset() on bare metal, exit(rc) on linux-host */
+    app_on_exit(rc);             /* weak default: nothing on bare metal, exit(rc) on linux-host */
     /* USER CODE END 2 */
 
     for (;;) {}
 }
 ```
+
+Returning from `app_main` on a board therefore parks the CPU rather than
+resetting it: an application that has finished — a benchmark that has
+printed its results — must not start over on its own. One that wants a
+restart calls `bsp_reset()` itself.
 
 `app_on_fault` is called from the BSP's own fault handlers (`HardFault_Handler`,
 an assert macro, a stack-overflow guard, etc.) immediately before the BSP's
@@ -480,29 +504,52 @@ Every BSP exposes:
    | verb | invocation | result (last stdout line, JSON) |
    |---|---|---|
    | `capabilities` | `entry_point capabilities --json` | dynamic capability data, merged by lean-bsp with the static `bsp.toml` |
-   | `build` | `entry_point build --app <path> --target <t> --bdir <dir> [--app-lib <path>] [--linker-script <path>] [--define K=V]*` | `{"status": "ok\|error\|manual", "artifact": {"elf": ..., "bin": ..., "hex": ...}}` |
+   | `build` | `entry_point build --app-json <path> --target <t> --bdir <dir>` | `{"status": "ok\|error\|manual", "artifact": {"elf": ..., "bin": ..., "hex": ...}}` |
    | `load` | `entry_point load --bdir <dir> [--target <t>]` | `{"status": "ok\|error\|manual"}` |
-   | `run` | `entry_point run --bdir <dir> [--target <t>] [--detach] [--timeout <s>]` | `{"status": "ok\|error\|manual", "com_device": ..., "exit_code": ...}` |
+   | `run` | `entry_point run --bdir <dir> [--target <t>] [--detach] [--timeout <s>] [--until <text>]` | `{"status": "ok\|error\|manual", "com_device": ..., "exit_code": ...}` |
 
    `status: "manual"` formalizes that m5531-style workaround as a first-class
    outcome, not an ad hoc hack, for BSPs whose build/flash step genuinely
    requires a human (a vendor IDE with no headless mode, for instance).
 
-   `run` starts the firmware from reset. On a board it returns as soon as
-   the firmware is running: there is no general way to observe a bare-metal
-   `app_main` returning, so `exit_code` is `null` there. Only where
-   completion is observable — `run_mode` `native-process` or `emulator` —
-   does `run` wait for the app to exit, forwarding its output and reporting
-   `exit_code`; `--detach` makes it return as soon as the app is running
-   instead, like a board. `--timeout <s>` bounds that wait and defaults to
-   none (`-1` also means wait forever), so a debugger can sit on a
-   breakpoint indefinitely.
+   `--app-json` names the resolved application, which lean-bsp writes to
+   `<bdir>/.lean-bsp/app.json` before every build: absolute paths of its
+   source files and include directories, its defines (`app.toml`'s merged
+   with `--define`), its custom linker script if any, and — for an
+   application with `[app.build]` — the static library to link instead of
+   sources. A BSP reads that file rather than parsing `app.toml`, so no BSP
+   carries its own `app.toml` parser and the schema can evolve without
+   touching every BSP.
+
+   `run` starts the firmware from reset. Where completion is observable —
+   `run_mode` `native-process` or `emulator` — `run` waits for the app to
+   exit, forwarding its output and reporting `exit_code`. On a board there is
+   no general way to observe a bare-metal `app_main` returning, so
+   `exit_code` is `null`; a board BSP that can follow its console (through
+   lean-hwbridge, below) streams it instead, until the text given with
+   `--until <text>` shows up, `--timeout` expires or Ctrl-C — the firmware
+   keeps running either way, and `--until` failing to show up within the
+   timeout is an error, so `lbsp build-load-run --until 'hello-world done'
+   --timeout 60` is a test. `--detach` makes `run` return as soon as the app
+   is running. `--timeout <s>` defaults to none (`-1` also means wait
+   forever), so a debugger can sit on a breakpoint indefinitely.
+
+   Board BSPs reach the hardware through
+   [lean-hwbridge](https://github.com/sebastien-riou/lean-hwbridge) (`hwbridge`
+   on PATH, or the command in `HWBRIDGE`): it flashes, resets, powers boards
+   through a usbman hub and relays their serial ports, for a sandboxed
+   session as for a terminal, and lets a BSP capture a boot report from its
+   first byte. The board is the usbman nickname in `HWBRIDGE_BOARD`, by
+   default the BSP name. Without a bridge, `load` and `run` report
+   `manual`, with the command to run by hand.
 
    `com_device` is the path a host-side tool opens to talk to the app's
-   UART 0: a USB serial device on a board, a pseudo-terminal on
-   `linux-host` (crypto-benchmark's own linux target already opens one
-   through `/dev/ptmx` and prints its name), or `null` when nothing is
-   reachable. Finding it is the BSP's job, as each crypto-benchmark BSP's
+   UART 0: a USB serial device on a board, or `hwbridge:<nickname>` when the
+   BSP goes through lean-hwbridge; on `linux-host`, a
+   pseudo-terminal when run with `--detach` (crypto-benchmark's own linux
+   target already opens one through `/dev/ptmx` and prints its name) and
+   `null` when `run` waits, since UART 0 is then the terminal; or `null`
+   when nothing is reachable. Finding it is the BSP's job, as each crypto-benchmark BSP's
    `find-uart` script already does. `run` reports it rather than `load`,
    because a board whose USB serial port is provided by the MCU itself
    re-enumerates on every reset. A host-side tool connects only after `run`
@@ -658,21 +705,27 @@ the registry but not cloned yet, the error names the exact
 `lbsp fetch <name>` command to run rather than fetching implicitly — a build
 should not reach the network on its own.
 
+A BSP *name* resolves to the directory `lean-bsp-<name>` in the workspace:
+the directory that holds the application's repository (the parent of its
+git root), which is where `fetch` clones it. `--bsp` also accepts a path,
+for a BSP checked out anywhere else; a value containing `/` is a path.
+
 Compatibility checking (for a chosen `target`): every key set to `true`
 in `app.requires` must also be `true` in the BSP's effective primitives
-(defaults merged with any per-`target` override), and
-`lean_bsp_contract_version` must match. A mismatch fails fast, listing
-exactly which primitives or version are missing — this is the guard that
+(defaults merged with any per-`target` override),
+`lean_bsp_contract_version` must match, and the BSP's `include/bsp_api.h`
+must be identical to lean-bsp's canonical header for that version. A
+mismatch fails fast, listing exactly which primitives, version or header
+are wrong — this is the guard that
 replaces crypto-benchmark's silent divergence between emulated and real
 boards.
 
 lean-bsp itself never generates a linker script or invokes a compiler
 directly: it resolves `--app`/`--bsp` and the `target` (see below —
 omitting `--target` is fine when the BSP declares only one), runs the
-compatibility check, and invokes the BSP's `entry_point build` with the
-resolved paths (including, if the app declares one,
-`--linker-script <path>`). The BSP's own native build system does the
-actual compiling and linking.
+compatibility check, writes the resolved `app.json`, and invokes the BSP's
+`entry_point build`. The BSP's own native build system does the actual
+compiling and linking.
 
 That covers an application small enough to be a list of sources. An
 application with a build of its own declares `[app.build]` instead —
@@ -691,8 +744,8 @@ not to the BSP) and setting:
 | `LEAN_BSP_APP_LIB` | where to write the static library: `<bdir>/app/libapp.a` |
 
 The command must write that library or fail, and may reject a `cpu` it has
-no dependencies for. lean-bsp then passes the library to `entry_point build`
-as `--app-lib <path>`, and the BSP links it instead of compiling sources.
+no dependencies for. lean-bsp then records the library in `app.json`
+(`lib`), and the BSP links it instead of compiling sources.
 lean-bsp still invokes no compiler itself, and the CPU flags still come only
 from the BSP target. This is the shape all three crypto-benchmark BSPs
 already use — each links `../crypto-benchmark/build/<cpu>/libcrypto-benchmark.a`
@@ -711,15 +764,15 @@ lean-bsp doctor [--bsp <name>]
 lean-bsp check [--app <path>] [--bsp <name-or-path>] [--target <t>]
 lean-bsp build [--app <path>] [--bsp <name-or-path>] [--target <t>] [--bdir <dir>] [--define K=V]...
 lean-bsp load  [--bdir <dir>] [--app <path>] [--bsp <name-or-path>] [--target <t>]
-lean-bsp run   [--bdir <dir>] [--app <path>] [--bsp <name-or-path>] [--target <t>] [--detach] [--timeout <s>]
-lean-bsp build-load-run [--app <path>] [--bsp <name-or-path>] [--target <t>] [--bdir <dir>] [--define K=V]... [--detach] [--timeout <s>]
-lean-bsp load-run [--bdir <dir>] [--app <path>] [--bsp <name-or-path>] [--target <t>] [--detach] [--timeout <s>]
+lean-bsp run   [--bdir <dir>] [--app <path>] [--bsp <name-or-path>] [--target <t>] [--detach] [--timeout <s>] [--until <text>]
+lean-bsp build-load-run [--app <path>] [--bsp <name-or-path>] [--target <t>] [--bdir <dir>] [--define K=V]... [--detach] [--timeout <s>] [--until <text>]
+lean-bsp load-run [--bdir <dir>] [--app <path>] [--bsp <name-or-path>] [--target <t>] [--detach] [--timeout <s>] [--until <text>]
 lean-bsp capabilities [--bsp <name-or-path>] [--json]
 ```
 
 Every one of these also answers to `lbsp`, a second console script for the
 same entry point (see Packaging below), so `lbsp build --app ../lean-app-a
---bsp stm32u5` is the same command as `lean-bsp build ...`.
+--bsp nucleo-u5a5` is the same command as `lean-bsp build ...`.
 
 `--app` is optional, and defaults to the application enclosing the current
 directory: lean-bsp looks for `app.toml` in the working directory and then
@@ -732,7 +785,7 @@ git clone .../lean-app-hello-world && cd lean-app-hello-world
 pipenv install .
 pipenv run lbsp build        # app from the current directory, BSP from app.toml's default_bsp
 pipenv run lbsp load-run     # → prints "hello world" on the developer's own machine
-pipenv run lbsp build-load-run --bsp stm32u5      # same app, real hardware, one option
+pipenv run lbsp build-load-run --bsp nucleo-u5a5      # same app, real hardware, one option
 ```
 
 Two rules keep this default from ever guessing wrong. It never falls back to
@@ -767,10 +820,10 @@ BSPs or targets never clobber each other, so this sequence needs exactly two
 builds and no rebuilds:
 
 ```
-lean-bsp build --app ../lean-app-a --bsp stm32u5      # → ../lean-app-a/build/stm32u5/cortex-m33
-lean-bsp build --app ../lean-app-b --bsp stm32u5      # → ../lean-app-b/build/stm32u5/cortex-m33
-lean-bsp load-run --app ../lean-app-a --bsp stm32u5   # reuses app A's build
-lean-bsp load-run --app ../lean-app-b --bsp stm32u5   # reuses app B's build
+lean-bsp build --app ../lean-app-a --bsp nucleo-u5a5      # → ../lean-app-a/build/nucleo-u5a5/cortex-m33
+lean-bsp build --app ../lean-app-b --bsp nucleo-u5a5      # → ../lean-app-b/build/nucleo-u5a5/cortex-m33
+lean-bsp load-run --app ../lean-app-a --bsp nucleo-u5a5   # reuses app A's build
+lean-bsp load-run --app ../lean-app-b --bsp nucleo-u5a5   # reuses app B's build
 ```
 
 Builds that differ only in their `--define` values do share a directory,
@@ -811,11 +864,11 @@ lean-bsp build --app ../lean-app-hello-world --bsp linux-host   # one target: no
 lean-bsp run   --app ../lean-app-hello-world --bsp linux-host   # same app+bsp → same build dir
 
 lean-bsp fetch stm32u5 --ref v1.2.0
-lean-bsp build --app ../lean-app-hello-world --bsp stm32u5      # single CPU, boots from internal flash
-lean-bsp load  --app ../lean-app-hello-world --bsp stm32u5
+lean-bsp build --app ../lean-app-hello-world --bsp nucleo-u5a5  # single CPU, boots from internal flash
+lean-bsp load  --app ../lean-app-hello-world --bsp nucleo-u5a5
 
-# rp2350 offers both an Arm and a RISC-V target, so the choice must be explicit
-lean-bsp build --app ../lean-app-hello-world --bsp rp2350 --target rv32imcb
+# pico2's RP2350 offers both an Arm and a RISC-V target, so the choice must be explicit
+lean-bsp build --app ../lean-app-hello-world --bsp pico2 --target rv32imcb
 ```
 
 ### Registry and fetch
@@ -831,12 +884,19 @@ tags = ["host", "linux", "native"]
 # no default_ref: fetch tracks the default branch
 
 [[bsp]]
-name = "stm32u5"
-git = "https://gitlab.pqsh.net/leanbsp/lean-bsp-stm32u5.git"
+name = "nucleo-u5a5"
+git = "https://github.com/sebastien-riou/lean-bsp-nucleo-u5a5.git"
 default_ref = "v1.2.0"               # what fetch checks out when --ref is not given
-description = "ST STM32U5 Nucleo boards"
-tags = ["arm", "cortex-m33"]
+description = "ST NUCLEO-U5A5ZJ-Q board"
+tags = ["arm", "cortex-m33", "stm32u5"]
 ```
+
+A BSP is named after its board, not its MCU — it is a *board* support
+package, and two boards built around the same MCU still differ in pins,
+clocks, LEDs, buttons and debug probe. The repo is `lean-bsp-<board>`
+(`lean-bsp-nucleo-u5a5`, `lean-bsp-pico2`), the registry and `--bsp` name is
+the board alone, and the MCU goes in `tags`, so
+`lean-bsp list-bsps --tag stm32u5` still finds every board built around it.
 
 `lean-bsp registry add <url|path>` appends an extra registry file, resolved
 from `~/.config/lean-bsp/registry.d/*.toml` or the `LEAN_BSP_REGISTRY`
@@ -916,24 +976,32 @@ lean-bsp/
   hatch.toml
   leanbsp/
     __init__.py
+    __main__.py             # python -m leanbsp, same as lean-bsp / lbsp
     cli.py                  # argparse dispatch for the command surface above
+    flow.py                 # which app/BSP/target/bdir a command means; build/load/run, app.json, build-result.json
     manifest.py             # tomllib-based loaders/validators for bsp.toml / app.toml
     registry.py             # load + merge built-in and extra registries, name lookup
     fetch.py                # subprocess git clone/checkout, then the BSP's [bsp.setup] steps
     adapter.py              # subprocess contract: invoke <bsp>/entry_point <verb> ..., parse trailing JSON line
-    appbuild.py             # run app.toml's [app.build] command with the LEAN_BSP_* environment
-    compat.py                # primitive / contract-version compatibility checks
-    workspace.py              # sibling-directory resolution (../lean-bsp-<name>)
+    compat.py               # primitive / contract-version / bsp_api.h compatibility checks
+    workspace.py            # app.toml discovery, sibling-directory resolution (../lean-bsp-<name>)
+    errors.py
+    appbuild.py             # later phase: run app.toml's [app.build] command with the LEAN_BSP_* environment
     backends/
-      cmake_generic.py         # optional reference helper for new BSPs' entry-point scripts
+      cmake_generic.py      # later phase: optional reference helper for new BSPs' entry-point scripts
     data/
-      registry.toml             # built-in known-BSP list
+      registry.toml         # built-in known-BSP list
+      contract/1.0/bsp_api.h  # canonical header, one directory per contract version
   test/
+    conftest.py             # a throwaway workspace: an app repo next to a cloned fake BSP
     test_manifest.py
     test_registry.py
+    test_compat.py
     test_adapter.py
+    test_cli.py             # every command end to end against the fake BSP
+    test_fetch.py           # fetch from a local git repository, no network
+    test_linux_host.py      # hello-world on the real ../lean-bsp-linux-host, when cloned and gcc exists
     fixtures/fake-bsp/{bsp.toml,bsp_cli.py}
-    fixtures/fake-app/app.toml
 ```
 
 ## 6. Migration strategy
@@ -941,8 +1009,26 @@ lean-bsp/
 ### Order: hello-world → cm-trace → lean-ftl → crypto-benchmark
 
 **hello-world** ensure the general flow is convenient enough. Allow to check
-all the boards we will need fit into the BSP pattern. (stm32u5a5, stm32l5, stm32f207, 
-m5531, rp2350-cortex-m33, rp2350-rv32imcb)
+all the boards we will need fit into the BSP pattern: `nucleo-u5a5`,
+`nucleo-l552`, `nucleo-f207`, `numaker-m5531`, and `pico2` with both its
+`cortex-m33` and `rv32imcb` targets.
+
+To actually prove that fit, hello-world exercises every mandatory primitive
+— UART, LED, button, cycle counter, CPU frequency, delay, cache clear, heap
+usage and reset — and prints a report of what each returned. Phase 1 is
+done when:
+
+1. `lbsp build-load-run` prints that report on `linux-host` and on all six
+   board targets above;
+2. `lbsp check` rejects a BSP that lacks a primitive the application
+   requires, and one whose `include/bsp_api.h` differs from the canonical
+   header;
+3. one board's firmware is opened and debugged in its vendor IDE, from the
+   BSP's own project.
+
+Phase 1 covers applications given as source files only. `[app.build]`,
+`[[bsp.cores]]` and `lean-bsp registry add` wait for the phases that need
+them.
 
 **cm-trace** It has only one real BSP (`cm-trace-stm32f207`), and its
 existing override mechanism — weak `cmtrace_com_tx`/`cmtrace_com_rx`/
@@ -959,7 +1045,7 @@ pluralism or a packaged-distribution pipeline.
 (`get-lean-ftl`/`get-local-lean-ftl` → `lean-ftl-dist/{debug,minSizeRel}`)
 is the closest existing prior art to lean-bsp's fetch mechanism, so porting
 it feeds directly into hardening that part of the design. It also produces
-a real, reusable `lean-bsp-stm32u5` — `crypto-benchmark-stm32u5` and
+a real, reusable `lean-bsp-nucleo-u5a5` — `crypto-benchmark-stm32u5` and
 `lean-ftl-stm32u5` were confirmed by diffing their `.ioc`/linker/startup
 files to be the *same physical Nucleo board* (`NUCLEO-U5A5ZJ-Q`), just
 regenerated at two different CubeMX versions (6.16.1 vs 6.11.1) — so this
@@ -982,7 +1068,7 @@ application-side shims over `bsp_api.h` (`LBMK_get_cpu_timestamp` →
 `bsp_cycle_count`, `LBMK_clear_caches` → `bsp_clear_caches`, the heap hooks →
 `bsp_heap_usage_reset`/`bsp_heap_usage`), and `benchmark.py`'s
 `find-uart` step becomes the `com_device` that `run` reports. By the time
-this migration starts, `lean-bsp-stm32u5` already exists from the lean-ftl
+this migration starts, `lean-bsp-nucleo-u5a5` already exists from the lean-ftl
 migration, so most of the work is *consuming* an already-proven BSP rather
 than a fresh board bring-up.
 
@@ -996,7 +1082,7 @@ which NVM regions get registered — becomes the restructured core repo's
 `app_main`.
 
 Concretely for `stm32u5` (the board shared across two projects): reusable
-as-is into a single `lean-bsp-stm32u5` — the CMSIS/HAL/Nucleo `Drivers/`
+as-is into a single `lean-bsp-nucleo-u5a5` — the CMSIS/HAL/Nucleo `Drivers/`
 tree, `startup_stm32u5a5xx.s`, the `.ld` memory map, `SystemClock_Config()`
 and related bring-up, and — moved wholesale out of lean-ftl's
 `target/stm32/stm32u5-accessors.c` — the STM32U5 flash-controller
@@ -1010,7 +1096,7 @@ decision of which `lftl_ctx_t` function pointers get registered with what
 region geometry.
 
 Concretely for the `cm-trace-stm32f207` pilot: reusable as-is into
-`lean-bsp-stm32f207` — CMSIS/HAL drivers, `startup_stm32f207xx.s`, the
+`lean-bsp-nucleo-f207` — CMSIS/HAL drivers, `startup_stm32f207xx.s`, the
 linker script, `SystemClock_Config()`/peripheral init, the UART3-based
 `__io_putchar`/`__io_getchar`, the LED on/off calls, the
 `cmtrace_clear_caches` implementation (becoming `bsp_clear_caches`), and the TIM5-based
@@ -1043,16 +1129,16 @@ lean-bsp's own tooling — never delete-then-fix.
    needs (`cmtrace_com_tx`/`cmtrace_com_rx`/`cmtrace_clear_caches`,
    `cmtrace_timer_*`) via `app.toml`. The old `libcmtrace` CMake target
    keeps building unmodified during the transition window.
-2. `lean-bsp-stm32f207` is created as a project-agnostic repo: CubeMX
+2. `lean-bsp-nucleo-f207` is created as a project-agnostic repo: CubeMX
    bring-up, the modular `linker/` fragment set, the four-line `main()`
    glue, `bsp.toml` + `bsp_cli.py`, and implementations of the UART3, LED,
    TIM5-based cycle-counter, and cache-clear (`bsp_clear_caches`)
    primitives. It contains
    no mention of "cmtrace" anywhere in its source.
 3. `cm-trace-stm32f207` (the old project-specific repo) is retired, replaced
-   by `lean-bsp-stm32f207` plus the restructured cm-trace app-lib, built
+   by `lean-bsp-nucleo-f207` plus the restructured cm-trace app-lib, built
    through the lean-bsp CLI.
-4. **Cross-reuse proof:** the same, unmodified `lean-bsp-stm32f207` also
+4. **Cross-reuse proof:** the same, unmodified `lean-bsp-nucleo-f207` also
    builds successfully against `lean-app-hello-world`, once
    `lean-bsp-linux-host` and the hello-world app are far enough along for
    this to be meaningful. This is the concrete, falsifiable test that the
@@ -1060,18 +1146,18 @@ lean-bsp's own tooling — never delete-then-fix.
    board-specific tweak were needed to make the second application build,
    the split was done wrong.
 5. **Regression check:** the cm-trace app-lib built against
-   `lean-bsp-stm32f207` reproduces the same cycle-count trace behavior as
+   `lean-bsp-nucleo-f207` reproduces the same cycle-count trace behavior as
    the legacy `cm-trace-stm32f207` — at minimum, a byte-for-byte comparison
    of UART output against a captured legacy-firmware baseline.
 6. The scaffolding-duplication eliminated by this migration (file/line
-   count of `lean-bsp-stm32f207` versus the sum of the old per-project BSP
+   count of `lean-bsp-nucleo-f207` versus the sum of the old per-project BSP
    boilerplate it replaces) is written up here or in a migration log, as
    the quantifiable evidence for the drawback CLAUDE.md originally called
    out.
 
 Once this checklist is green, the same structure — repo restructure, generic
 BSP repo, retirement of the old BSP, cross-app reuse proof, regression
-check — repeats for `lean-ftl` (with `lean-bsp-stm32u5` as its milestone
+check — repeats for `lean-ftl` (with `lean-bsp-nucleo-u5a5` as its milestone
 board) and then `crypto-benchmark`.
 
 ## Critical files referenced by this design

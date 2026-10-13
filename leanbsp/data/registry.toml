@@ -1,0 +1,39 @@
+# Built-in list of known BSPs. A BSP is named after its board; the MCU goes in tags.
+# Extra registry files (~/.config/lean-bsp/registry.d/*.toml, LEAN_BSP_REGISTRY) are
+# merged on top, an extra entry winning on a name collision.
+
+[[bsp]]
+name = "linux-host"
+git = "https://github.com/sebastien-riou/lean-bsp-linux-host.git"
+description = "Run/debug apps as a native Linux process; day-1 cross-platform target"
+tags = ["host", "linux", "native"]
+
+[[bsp]]
+name = "nucleo-f207"
+git = "https://github.com/sebastien-riou/lean-bsp-nucleo-f207.git"
+description = "ST NUCLEO-F207ZG board"
+tags = ["arm", "cortex-m3", "stm32f2", "stm32f207"]
+
+[[bsp]]
+name = "nucleo-l552"
+git = "https://github.com/sebastien-riou/lean-bsp-nucleo-l552.git"
+description = "ST NUCLEO-L552ZE-Q board"
+tags = ["arm", "cortex-m33", "stm32l5", "stm32l552"]
+
+[[bsp]]
+name = "nucleo-u5a5"
+git = "https://github.com/sebastien-riou/lean-bsp-nucleo-u5a5.git"
+description = "ST NUCLEO-U5A5ZJ-Q board"
+tags = ["arm", "cortex-m33", "stm32u5", "stm32u5a5"]
+
+[[bsp]]
+name = "numaker-m5531"
+git = "https://github.com/sebastien-riou/lean-bsp-numaker-m5531.git"
+description = "Nuvoton NuMaker-M5531 board"
+tags = ["arm", "cortex-m55", "m5531"]
+
+[[bsp]]
+name = "pico2"
+git = "https://github.com/sebastien-riou/lean-bsp-pico2.git"
+description = "Raspberry Pi Pico 2 board (RP2350: Cortex-M33 and Hazard3 RISC-V targets)"
+tags = ["arm", "cortex-m33", "riscv", "rv32", "rp2350"]

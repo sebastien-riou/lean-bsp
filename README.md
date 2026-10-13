@@ -30,9 +30,45 @@ This project provides a python package including a CLI to build an application g
 - The application can be opened with Silicon vendor tools and debugged as such.
 - Application projects are cross-platform from day 1 (there is a BSP for 'linux-host')
 
+## Usage
+
+Install from a clone (Python 3.11 or later, no runtime dependencies); this provides both `lean-bsp` and its short
+form `lbsp`:
+
+````
+pip install -e .
+````
+
+Then, from inside an application repository (one with an `app.toml`), with its BSPs cloned next to it:
+
+````
+lbsp build-load-run                      # BSP from app.toml's default_bsp, e.g. linux-host
+lbsp build-load-run --bsp nucleo-l552    # same application, real hardware
+lbsp list-bsps                           # known BSPs and which ones are cloned
+lbsp check --bsp nucleo-l552             # does this BSP offer every primitive the application needs?
+````
+
+`lbsp --help` and `lbsp <command> --help` list everything. Without installing, `python3 -m leanbsp` runs the same
+CLI from a clone of this repository (with the clone on `PYTHONPATH`).
+
+The design, including the BSP/application contract (`bsp_api.h`) and the BSP entry-point protocol, is in
+[ARCHITECTURE.md](ARCHITECTURE.md).
+
+Run the tests with `python3 -m pytest test`.
+
+## Status
+
+Phase 1 of the migration plan (ARCHITECTURE.md §6) is in progress: the CLI, the `linux-host` BSP and the
+hello-world application work end to end; the board BSPs are being written. Not implemented yet:
+`[app.build]` applications and `lean-bsp registry add`.
 
 ## related repostories
 They are cloned at the same level as this one.
 
 - [`lean-bsp-linux-host`](https://github.com/sebastien-riou/lean-bsp-linux-host): the linux-host BSP
-- [`lean-app-hello-world`](https://github.com/sebastien-riou/lean-app-hello-world): minimal example of a cross platform project using this framework
+- [`lean-app-hello-world`](https://github.com/sebastien-riou/lean-app-hello-world): minimal example of a cross platform project using this framework, and the report every new BSP is checked with
+- Board BSPs: [`lean-bsp-nucleo-f207`](https://github.com/sebastien-riou/lean-bsp-nucleo-f207),
+  [`lean-bsp-nucleo-l552`](https://github.com/sebastien-riou/lean-bsp-nucleo-l552),
+  [`lean-bsp-nucleo-u5a5`](https://github.com/sebastien-riou/lean-bsp-nucleo-u5a5),
+  [`lean-bsp-numaker-m5531`](https://github.com/sebastien-riou/lean-bsp-numaker-m5531),
+  [`lean-bsp-pico2`](https://github.com/sebastien-riou/lean-bsp-pico2)
