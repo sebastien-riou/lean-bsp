@@ -1041,6 +1041,12 @@ done when:
 3. one board's firmware is opened and debugged in its vendor IDE, from the
    BSP's own project.
 
+All three are met: the report on all seven targets, `lbsp check`'s
+rejections under test, and `nucleo-f207` debugged in STM32CubeIDE 2.0.0,
+which imports the ELF lean-bsp builds and finds the application's, the
+BSP's and the HAL's sources through its debug information (that BSP's
+README has the steps). The IDE debugs; lean-bsp keeps building.
+
 Phase 1 covers applications given as source files only. `[app.build]`,
 `[[bsp.cores]]` and `lean-bsp registry add` wait for the phases that need
 them.

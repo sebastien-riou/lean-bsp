@@ -58,9 +58,10 @@ Run the tests with `python3 -m pytest test`.
 
 ## Status
 
-Phase 1 of the migration plan (ARCHITECTURE.md §6) is in progress: the CLI, the `linux-host` BSP and the
-hello-world application work end to end; the board BSPs are being written. Not implemented yet:
-`[app.build]` applications and `lean-bsp registry add`.
+Phase 1 of the migration plan (ARCHITECTURE.md §6) is done: hello-world runs end to end on `linux-host` and
+on all six board targets (through [lean-hwbridge](https://github.com/sebastien-riou/lean-hwbridge) for the
+boards), and debugs in STM32CubeIDE on `nucleo-f207`. Not implemented yet: `[app.build]` applications
+and `lean-bsp registry add`.
 
 ## related repostories
 They are cloned at the same level as this one.
@@ -72,3 +73,5 @@ They are cloned at the same level as this one.
   [`lean-bsp-nucleo-u5a5`](https://github.com/sebastien-riou/lean-bsp-nucleo-u5a5),
   [`lean-bsp-numaker-m5531`](https://github.com/sebastien-riou/lean-bsp-numaker-m5531),
   [`lean-bsp-pico2`](https://github.com/sebastien-riou/lean-bsp-pico2)
+- [`lean-hwbridge`](https://github.com/sebastien-riou/lean-hwbridge): how the board BSPs' `load` and `run`
+  reach the boards' power, serial ports and debug probes, from a sandboxed session or another machine
