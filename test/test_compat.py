@@ -1,9 +1,24 @@
-from leanbsp.compat import problems, supported_contracts
+import pytest
+
+from leanbsp.compat import canonical_header, contract_serves, problems, supported_contracts
 from leanbsp.manifest import load_app, load_bsp
 
 
-def test_contract_1_0_is_shipped():
-    assert '1.0' in supported_contracts()
+def test_contracts_shipped():
+    assert {'1.0', '1.1'} <= set(supported_contracts())
+
+
+def test_contract_1_1_adds_the_cycle_timer_to_1_0():
+    old, new = canonical_header('1.0').decode(), canonical_header('1.1').decode()
+    assert 'bsp_cycle_timer_start' in new and 'bsp_cycle_timer_start' not in old
+    assert '#define LEAN_BSP_CONTRACT_VERSION "1.1"' in new
+
+
+@pytest.mark.parametrize('bsp_version, app_version, serves', [
+    ('1.1', '1.0', True), ('1.1', '1.1', True), ('1.0', '1.1', False), ('2.0', '1.1', False), ('1.0', '1.0', True),
+])
+def test_contract_serves_earlier_minor_versions(bsp_version, app_version, serves):
+    assert contract_serves(bsp_version, app_version) is serves
 
 
 def test_compatible(workspace):

@@ -16,6 +16,7 @@ PRIMITIVES = (
     'cpu_frequency',
     'cache_clear',
     'heap_usage',
+    'cycle_timer',
     'flash_read',
     'flash_erase',
     'flash_write',

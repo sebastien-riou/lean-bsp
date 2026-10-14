@@ -29,9 +29,20 @@ def bsp_problems(bsp: Bsp) -> list[str]:
     return []
 
 
+def contract_serves(bsp_version: str, app_version: str) -> bool:
+    """A contract adds only within a major version, so a BSP serves applications written for its own
+    version or an earlier minor version of the same major."""
+    try:
+        bsp_major, bsp_minor = (int(n) for n in bsp_version.split('.'))
+        app_major, app_minor = (int(n) for n in app_version.split('.'))
+    except ValueError:
+        return bsp_version == app_version
+    return bsp_major == app_major and bsp_minor >= app_minor
+
+
 def problems(app: App, bsp: Bsp, target: Target) -> list[str]:
     found = bsp_problems(bsp)
-    if app.contract_version != bsp.contract_version:
+    if not contract_serves(bsp.contract_version, app.contract_version):
         found.append(
             f'{app.name} targets contract {app.contract_version} but BSP {bsp.name} implements {bsp.contract_version}'
         )

@@ -60,8 +60,9 @@ Run the tests with `python3 -m pytest test`.
 
 Phase 1 of the migration plan (ARCHITECTURE.md §6) is done: hello-world runs end to end on `linux-host` and
 on all six board targets (through [lean-hwbridge](https://github.com/sebastien-riou/lean-hwbridge) for the
-boards), and debugs in STM32CubeIDE on `nucleo-f207`. Not implemented yet: `[app.build]` applications
-and `lean-bsp registry add`.
+boards), and debugs in STM32CubeIDE on `nucleo-f207`. The first legacy project, cm-trace, now builds and traces
+as a lean-bsp application on `nucleo-f207`, through contract 1.1's cycle timer, with traces identical to its old
+board project's. Not implemented yet: `[app.build]` applications and `lean-bsp registry add`.
 
 ## related repostories
 They are cloned at the same level as this one.

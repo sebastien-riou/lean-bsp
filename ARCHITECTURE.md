@@ -174,6 +174,36 @@ the same bytes on the same wire. On `linux-host`, UART 0 is the process's
 own stdin/stdout when `run` waits for it, and a pseudo-terminal reported as
 `com_device` when it runs with `--detach` (§5).
 
+### Contract versions, and the cycle timer (1.1)
+
+A contract only grows within a major version: a BSP serves applications
+written for its own version or an earlier minor version of the same major
+(`lbsp check`), and keeps the canonical header of the version it
+implements. Contract 1.1 adds one optional primitive to 1.0, `cycle_timer`,
+for cm-trace:
+
+```c
+typedef void (*bsp_cycle_timer_handler_t)(void);
+void      bsp_cycle_timer_init(bsp_cycle_timer_handler_t handler);
+void      bsp_cycle_timer_start(uint32_t cycles);
+void      bsp_cycle_timer_stop(void);
+uint32_t  bsp_cycle_timer_read(void);
+void      bsp_cycle_timer_ack(void);
+```
+
+A one-shot timer counting CPU cycles, whose interrupt preempts everything
+else the BSP runs and enters `handler` as the interrupt's own exception
+handler, so the handler may rewrite the interrupted context; one more in
+`cycles` delays the interrupt by exactly one cycle, and the BSP holds off its
+own other interrupts (its tick) while the timer runs. cm-trace's
+`cmtrace_timer_*` map onto it one for one. On `nucleo-f207` it is TIM5, which
+counts the core clock there, with the handler placed in a RAM copy of the
+vector table rather than by editing the vendor startup file. A Cortex-M BSP
+could also build it on the DWT comparator and DebugMonitor, as
+`libcmtrace/source/dwt.c` does, but that one refuses to run once a debugger
+has left halting debug enabled, which every ST-LINK reset does. All the
+phase-1 BSPs moved to 1.1; only `nucleo-f207` offers the cycle timer so far.
+
 ### The glue sequence
 
 The entire contract surface inside `main()` is four lines, owned by the BSP:
@@ -1175,6 +1205,36 @@ lean-bsp's own tooling — never delete-then-fix.
    boilerplate it replaces) is written up here or in a migration log, as
    the quantifiable evidence for the drawback CLAUDE.md originally called
    out.
+
+Where the pilot stands:
+
+1. Done. cm-trace has an `app.toml` and one 59-line glue file,
+   `lean-bsp/cmtrace_lean_bsp.c`, which maps its support functions onto
+   `bsp_api.h` and runs `cmtrace_trace_loop` from `app_main`; it builds
+   `libcmtrace` without `dwt.c`. The CMake build of `libcmtrace` is
+   untouched. Its timer needs became contract 1.1's cycle timer (§1).
+2. Done. `lean-bsp-nucleo-f207` offers the cycle timer on TIM5; its source
+   does not mention cmtrace. The cycle counter stays the DWT, which counts
+   the same core clock.
+3. To do by the owner: retire `cm-trace-stm32f207` (its README to point to
+   the lean-bsp build, the repository archived).
+4. Done, on hardware: hello-world runs on the same `lean-bsp-nucleo-f207`.
+5. Done, adapted. A byte-for-byte comparison of the UART stream cannot hold:
+   it carries absolute addresses, which move with the link layout. The
+   comparison is of the decoded traces instead: every column of
+   `cmtrace-dump` but the address (opcode, cycles, first and last cycle,
+   function, call events), for `umul64` with each operand size and `loop64`
+   with 4, 32 and 256 iterations (up to 4,104 instructions, 4,628 cycles).
+   They are identical. The baseline is the committed `cm-trace-stm32f207`
+   with the committed cm-trace, its library built `-Og` like lean-bsp's
+   build so both trace the same machine code; captures went through
+   lean-hwbridge's `serial pty`.
+6. The numbers. The legacy per-project BSP was 26 files and 4,016 lines,
+   plus 846 driver files (63 MB). Under lean-bsp, cm-trace's own board
+   support is 2 files and 80 lines (`app.toml` and the glue); the board
+   support itself lives once, in `lean-bsp-nucleo-f207` (24 files and 3,779
+   lines, plus 170 driver files, 8.8 MB), shared by every application that
+   runs on that board, hello-world already among them.
 
 Once this checklist is green, the same structure — repo restructure, generic
 BSP repo, retirement of the old BSP, cross-app reuse proof, regression
