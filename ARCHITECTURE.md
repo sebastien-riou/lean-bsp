@@ -1297,8 +1297,9 @@ Where the pilot stands:
 2. Done. `lean-bsp-nucleo-f207` offers the cycle timer on TIM5; its source
    does not mention cmtrace. The cycle counter stays the DWT, which counts
    the same core clock.
-3. To do by the owner: retire `cm-trace-stm32f207` (its README to point to
-   the lean-bsp build, the repository archived).
+3. Done. `cm-trace-stm32f207` is archived; its README says it is
+   deprecated and points to cm-trace's lean-bsp build on
+   `lean-bsp-nucleo-f207`.
 4. Done, on hardware: hello-world runs on the same `lean-bsp-nucleo-f207`.
 5. Done, adapted. A byte-for-byte comparison of the UART stream cannot hold:
    it carries absolute addresses, which move with the link layout. The
