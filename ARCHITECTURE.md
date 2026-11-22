@@ -1346,7 +1346,9 @@ Where the pilot stands:
    build so both trace the same machine code; captures went through
    lean-hwbridge's `serial pty`.
 6. The numbers. The legacy per-project BSP was 26 files and 4,016 lines,
-   plus 846 driver files (63 MB). Under lean-bsp, cm-trace's own board
+   plus 846 driver files (27.8 MB tracked; the 63 MB first given here also
+   counted the prebuilt libraries git ignores in its `Drivers/CMSIS/Lib/`).
+   Under lean-bsp, cm-trace's own board
    support is 2 files and 80 lines (`app.toml` and the glue); the board
    support itself lives once, in `lean-bsp-nucleo-f207` (24 files and 3,779
    lines, plus 170 driver files, 8.8 MB), shared by every application that
@@ -1424,7 +1426,22 @@ Where the migration stands:
    mentions in the documentation; the Linux simulator keeps the 4 KB/2-byte
    geometry, the smallest write unit the tests cover). To do by the owner:
    archive the two testbench repositories.
-7. To do.
+7. Done. The numbers, counting tracked files, the drivers apart. The two
+   testbenches were 43 files each, 4,676 lines (U5A5) and 4,904 (L552),
+   plus 103 and 109 driver files (9.9 and 8.6 MB), and linked a lean-ftl
+   release's prebuilt libraries, which they fetched (`get-lean-ftl`):
+   built without `HAS_PRINTF`, they only blinked the LED. Under lean-bsp,
+   lean-ftl's own board support is 2 files and 85 lines (`app.toml` and
+   `lean-bsp/lftl_lean_bsp.c`), plus 16 lines in two headers of its test
+   library, built from source with its results printed. The board support
+   lives in the BSPs, shared: `lean-bsp-nucleo-u5a5` (27 files, 4,217
+   lines, plus 302 driver files, 19.2 MB) and `lean-bsp-nucleo-l552` (27
+   files, 4,260 lines, plus 109 driver files, 8.6 MB) already ran
+   hello-world and cm-trace, and lean-ftl added to each its NVM code, 162
+   and 168 lines (`src/bsp_nvm.c`, `.h`), the flash sequences moved out of
+   lean-ftl's accessors. The Pico 2 then came for 114 lines in
+   `lean-bsp-pico2` and nothing in lean-ftl: a third board and its two
+   cores, for the cost of its flash driver.
 
 Out of scope for now: the three board experiments under `test/boards/`
 (zeros over zeros, torn erase, erase time), which are pasted into a
