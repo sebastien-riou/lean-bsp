@@ -1410,7 +1410,7 @@ Where the migration stands:
 4. Done: `Callbacks test PASS` and `Tests 1 to 45 PASSED` on both boards
    through lean-bsp. The suite takes about 30 s on the U5A5 at 160 MHz, down
    from about 7 minutes on the 4 MHz testbench. Beyond the plan, the Pico 2
-   (`pico2`, `cortex-m33`) passes too: region 0 is the upper 2 MB of its
+   (`pico2`, on its Cortex-M33 and on its Hazard3) passes too: region 0 is the upper 2 MB of its
    QSPI flash, 8-byte write units without zero overwrite, so the suite's
    first board run of its no-pinning variant; each unit is programmed on
    its own (a page program puts all its bytes in flight at once), a write to
