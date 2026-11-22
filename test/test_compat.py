@@ -5,7 +5,7 @@ from leanbsp.manifest import load_app, load_bsp
 
 
 def test_contracts_shipped():
-    assert {'1.0', '1.1'} <= set(supported_contracts())
+    assert {'1.0', '1.1', '1.2'} <= set(supported_contracts())
 
 
 def test_contract_1_1_adds_the_cycle_timer_to_1_0():
@@ -14,8 +14,15 @@ def test_contract_1_1_adds_the_cycle_timer_to_1_0():
     assert '#define LEAN_BSP_CONTRACT_VERSION "1.1"' in new
 
 
+def test_contract_1_2_describes_the_nvm_regions_further():
+    old, new = canonical_header('1.1').decode(), canonical_header('1.2').decode()
+    for added in ('write_size;', 'zero_overwrite;', 'BSP_NVM_REFUSED', '.bsp_nvm<N>', 'LEAN_BSP_NVM_REGIONS'):
+        assert added in new and added not in old
+    assert '#define LEAN_BSP_CONTRACT_VERSION "1.2"' in new
+
+
 @pytest.mark.parametrize('bsp_version, app_version, serves', [
-    ('1.1', '1.0', True), ('1.1', '1.1', True), ('1.0', '1.1', False), ('2.0', '1.1', False), ('1.0', '1.0', True),
+    ('1.2', '1.1', True), ('1.1', '1.2', False), ('1.1', '1.0', True), ('1.1', '1.1', True), ('1.0', '1.1', False), ('2.0', '1.1', False), ('1.0', '1.0', True),
 ])
 def test_contract_serves_earlier_minor_versions(bsp_version, app_version, serves):
     assert contract_serves(bsp_version, app_version) is serves

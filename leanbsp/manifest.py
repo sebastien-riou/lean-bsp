@@ -21,6 +21,7 @@ PRIMITIVES = (
     'flash_erase',
     'flash_write',
 )
+FLASH_PRIMITIVES = ('flash_read', 'flash_erase', 'flash_write')
 
 _MISSING = object()
 
@@ -78,6 +79,18 @@ class Core:
 
 
 @dataclass
+class NvmRegion:
+    """Flash the firmware image never occupies, for the application's own data (contract 1.2)."""
+
+    name: str
+    base: int
+    size: int
+    page_size: int  # the erase unit
+    write_size: int  # the program unit
+    zero_overwrite: bool  # zeros may be programmed over a programmed unit
+
+
+@dataclass
 class Target:
     name: str
     cpu: str
@@ -101,6 +114,7 @@ class Bsp:
     setup_steps: list[str]
     primitives: dict[str, bool]
     cores: list[Core]
+    nvm_regions: list[NvmRegion]
     targets: list[Target]
 
     def target(self, name: str | None) -> Target:
@@ -142,6 +156,9 @@ def load_bsp(root: Path) -> Bsp:
             description=_get(core, 'description', path, where, str, ''),
         )
 
+    contract_version = _get(bsp, 'lean_bsp_contract_version', path, 'bsp')
+    nvm_regions = _nvm_regions(bsp, path, contract_version)
+
     targets: list[Target] = []
     for t in _get(bsp, 'targets', path, 'bsp', list):
         tname = _get(t, 'name', path, 'bsp.targets')
@@ -163,6 +180,9 @@ def load_bsp(root: Path) -> Bsp:
             raise LeanBspError(f'{path}: {where}.run_mode must be one of {", ".join(RUN_MODES)}')
         override_table = _get(t, 'primitives_override', path, where, dict, {})
         override = _primitives(override_table, path, f'{where}.primitives_override')
+        flash = [p for p in FLASH_PRIMITIVES if {**defaults, **override}[p]]
+        if flash and not nvm_regions and _contract_at_least(contract_version, 1, 2):
+            raise LeanBspError(f'{path}: {where} offers {", ".join(flash)} but [[bsp.nvm_regions]] declares no region')
         targets.append(
             Target(
                 name=tname,
@@ -181,7 +201,7 @@ def load_bsp(root: Path) -> Bsp:
     return Bsp(
         root=root,
         name=name,
-        contract_version=_get(bsp, 'lean_bsp_contract_version', path, 'bsp'),
+        contract_version=contract_version,
         version=_get(bsp, 'version', path, 'bsp', str, '0.0.0'),
         description=_get(bsp, 'description', path, 'bsp', str, ''),
         entry_point=root / _get(bsp, 'entry_point', path, 'bsp'),
@@ -189,8 +209,69 @@ def load_bsp(root: Path) -> Bsp:
         setup_steps=_str_list(setup, 'steps', path, 'bsp.setup', []),
         primitives=defaults,
         cores=list(cores.values()),
+        nvm_regions=nvm_regions,
         targets=targets,
     )
+
+
+def _contract_at_least(version: str, major: int, minor: int) -> bool:
+    try:
+        have = tuple(int(part) for part in version.split('.')[:2])
+    except ValueError:
+        return False
+    return have >= (major, minor)
+
+
+def _whole(table: dict, key: str, path: Path, where: str, *, minimum: int) -> int:
+    value = _get(table, key, path, where, int)
+    if isinstance(value, bool) or value < minimum:
+        raise LeanBspError(f'{path}: {where}.{key} must be an integer of at least {minimum}')
+    return value
+
+
+def _nvm_regions(bsp: dict, path: Path, contract_version: str) -> list[NvmRegion]:
+    regions: list[NvmRegion] = []
+    for i, table in enumerate(_get(bsp, 'nvm_regions', path, 'bsp', list, [])):
+        where = f'bsp.nvm_regions[{i}]'
+        if not isinstance(table, dict):
+            raise LeanBspError(f'{path}: {where} must be a table')
+        region = NvmRegion(
+            name=_get(table, 'name', path, where),
+            base=_whole(table, 'base', path, where, minimum=0),
+            size=_whole(table, 'size', path, where, minimum=1),
+            page_size=_whole(table, 'page_size', path, where, minimum=1),
+            write_size=_whole(table, 'write_size', path, where, minimum=1),
+            zero_overwrite=_get(table, 'zero_overwrite', path, where, bool, False),
+        )
+        if region.write_size & (region.write_size - 1):
+            raise LeanBspError(f'{path}: {where}.write_size must be a power of two')
+        if region.page_size % region.write_size:
+            raise LeanBspError(f'{path}: {where}.page_size must be a multiple of write_size')
+        if region.base % region.page_size or region.size % region.page_size:
+            raise LeanBspError(f'{path}: {where}.base and .size must be multiples of page_size')
+        if any(r.name == region.name for r in regions):
+            raise LeanBspError(f'{path}: duplicate NVM region name {region.name!r}')
+        regions.append(region)
+    if regions and not _contract_at_least(contract_version, 1, 2):
+        raise LeanBspError(f'{path}: [[bsp.nvm_regions]] needs contract 1.2 or later, the BSP implements {contract_version}')
+    return regions
+
+
+def nvm_defines(bsp: Bsp) -> list[str]:
+    """The geometry of the BSP's NVM regions, as defines for the application's compilation."""
+    if not bsp.nvm_regions:
+        return []
+    defines = [f'LEAN_BSP_NVM_REGIONS={len(bsp.nvm_regions)}']
+    for i, r in enumerate(bsp.nvm_regions):
+        prefix = f'LEAN_BSP_NVM{i}_'
+        defines += [
+            f'{prefix}BASE=0x{r.base:08X}',
+            f'{prefix}SIZE=0x{r.size:X}',
+            f'{prefix}PAGE_SIZE={r.page_size}',
+            f'{prefix}WRITE_SIZE={r.write_size}',
+            f'{prefix}ZERO_OVERWRITE={int(r.zero_overwrite)}',
+        ]
+    return defines
 
 
 @dataclass

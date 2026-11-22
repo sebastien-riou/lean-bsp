@@ -1,7 +1,7 @@
 import pytest
 
 from leanbsp.errors import LeanBspError
-from leanbsp.manifest import load_app, load_bsp, merge_defines
+from leanbsp.manifest import load_app, load_bsp, merge_defines, nvm_defines
 
 BSP_HEAD = """\
 [bsp]
@@ -138,6 +138,67 @@ def test_invalid_cores(tmp_path, cores, message):
 def test_invalid_bsp(tmp_path, targets, message):
     with pytest.raises(LeanBspError, match=message):
         load_bsp(write_bsp(tmp_path, targets))
+
+
+NVM_TARGET = '[[bsp.targets]]\nname = "t"\ncpu = "x"\ntoolchain = "gcc"\nrun_mode = "manual"\n'
+BANK2 = """
+[[bsp.nvm_regions]]
+name = "bank2"
+base = 0x08200000
+size = 0x200000
+page_size = 8192
+write_size = 16
+zero_overwrite = true
+"""
+
+
+def write_bsp_1_2(tmp_path, body: str):
+    head = BSP_HEAD.replace('lean_bsp_contract_version = "1.0"', 'lean_bsp_contract_version = "1.2"')
+    (tmp_path / 'bsp.toml').write_text(head + body)
+    return tmp_path
+
+
+def test_nvm_regions_and_their_defines(tmp_path):
+    bsp = load_bsp(write_bsp_1_2(tmp_path, BANK2 + NVM_TARGET))
+    (region,) = bsp.nvm_regions
+    assert (region.name, region.base, region.size, region.page_size, region.write_size, region.zero_overwrite) == (
+        'bank2', 0x08200000, 0x200000, 8192, 16, True)
+    assert nvm_defines(bsp) == [
+        'LEAN_BSP_NVM_REGIONS=1', 'LEAN_BSP_NVM0_BASE=0x08200000', 'LEAN_BSP_NVM0_SIZE=0x200000',
+        'LEAN_BSP_NVM0_PAGE_SIZE=8192', 'LEAN_BSP_NVM0_WRITE_SIZE=16', 'LEAN_BSP_NVM0_ZERO_OVERWRITE=1',
+    ]
+
+
+def test_no_nvm_region_no_define(tmp_path):
+    assert nvm_defines(load_bsp(write_bsp_1_2(tmp_path, NVM_TARGET))) == []
+
+
+@pytest.mark.parametrize(
+    ('body', 'message'),
+    [
+        (BANK2.replace('write_size = 16', 'write_size = 24'), 'write_size must be a power of two'),
+        (BANK2.replace('page_size = 8192', 'page_size = 8'), 'page_size must be a multiple of write_size'),
+        (BANK2.replace('base = 0x08200000', 'base = 0x08200100'), 'must be multiples of page_size'),
+        (BANK2.replace('size = 0x200000', 'size = 0'), 'size must be an integer of at least 1'),
+        (BANK2.replace('zero_overwrite = true', 'zero_overwrite = 1'), 'zero_overwrite must be a bool'),
+        (BANK2 + BANK2, "duplicate NVM region name 'bank2'"),
+    ],
+)
+def test_invalid_nvm_regions(tmp_path, body, message):
+    with pytest.raises(LeanBspError, match=message):
+        load_bsp(write_bsp_1_2(tmp_path, body + NVM_TARGET))
+
+
+def test_nvm_regions_need_contract_1_2(tmp_path):
+    with pytest.raises(LeanBspError, match='needs contract 1.2 or later'):
+        load_bsp(write_bsp(tmp_path, BANK2 + NVM_TARGET))
+
+
+def test_flash_primitives_need_a_region(tmp_path):
+    flash_target = NVM_TARGET + '[bsp.targets.primitives_override]\nflash_write = true\n'
+    with pytest.raises(LeanBspError, match='offers flash_write but'):
+        load_bsp(write_bsp_1_2(tmp_path, flash_target))
+    assert load_bsp(write_bsp_1_2(tmp_path, BANK2 + flash_target)).target('t').primitives['flash_write']
 
 
 def test_app_paths_are_absolute(workspace):

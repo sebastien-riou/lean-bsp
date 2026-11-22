@@ -213,6 +213,40 @@ timer (64 bits, so any 32-bit count). All the phase-1
 BSPs moved to 1.1; `nucleo-f207`, `nucleo-u5a5` (both on TIM5) and `pico2`
 (both targets) offer the cycle timer so far.
 
+### NVM regions (1.2)
+
+Contract 1.2 completes the flash/NVM part of 1.0 for lean-ftl, the first
+application that uses it. A region is flash the firmware image never
+occupies; the application may erase and program all of it. `bsp_nvm_region_t`
+gains the two properties an FTL cannot work without, `write_size` (the
+program unit) and `zero_overwrite` (whether zeros may be programmed over a
+programmed unit), and the callbacks get their rules: what alignment they may
+assume, `BSP_NVM_OK`, and `BSP_NVM_REFUSED` for a program the flash refused
+without programming anything (lean-ftl's EWLF areas step over such a unit).
+
+An application often needs the geometry at compile time, to lay its areas
+out. So the BSP declares its regions in `bsp.toml`:
+
+```toml
+[[bsp.nvm_regions]]
+name = "bank2"
+base = 0x08200000
+size = 0x200000
+page_size = 8192
+write_size = 16
+zero_overwrite = true
+```
+
+and lean-bsp passes them to the application's compilation:
+`LEAN_BSP_NVM_REGIONS`, then `LEAN_BSP_NVM<N>_BASE`, `_SIZE`, `_PAGE_SIZE`,
+`_WRITE_SIZE` and `_ZERO_OVERWRITE` for each region (`lbsp show-bsp` lists
+them). The BSP's linker script gathers the sections named `.bsp_nvm<N>` at the
+start of region N without loading anything there, so that an application can
+place its data in a region at link time; at run time
+`bsp_get_capabilities()->nvm_regions` gives the same regions with their
+callbacks. A target offering `flash_read`, `flash_erase` or `flash_write`
+must declare at least one region, and only a 1.2 BSP may declare any.
+
 ### The glue sequence
 
 The entire contract surface inside `main()` is four lines, owned by the BSP:
@@ -1322,6 +1356,69 @@ Once this checklist is green, the same structure — repo restructure, generic
 BSP repo, retirement of the old BSP, cross-app reuse proof, regression
 check — repeats for `lean-ftl` (with `lean-bsp-nucleo-u5a5` as its milestone
 board) and then `crypto-benchmark`.
+
+### The lean-ftl migration: definition of done
+
+lean-ftl's library is already portable: it reaches the flash only through
+the function pointers of `lftl_nvm_props_t`. What is tied to boards is its
+on-target test firmware: the test library (`liblean-ftl-test`, run by
+`test_callbacks(); test_main(0, NULL, NULL);`), the three hooks it needs
+(`led1`, `button`, `delay_ms`), the STM32U5 and STM32L5 flash accessors that
+`LFTL_ACCESSORS` compiles into the library itself, and two testbench repos,
+`lean-ftl-stm32u5` and `lean-ftl-stm32l5`, which link a release's prebuilt
+libraries. The migration starts from lean-ftl's `chunked-area` branch, whose
+45 tests pass on both boards. Decisions taken: the BSP keeps flash bank 2 out
+of the image and offers it as NVM region 0, every application linking into
+bank 1 (2 MB on the U5A5, 256 KB on the L552); the BSP declares the region's
+geometry, which lean-bsp passes to the application (contract 1.2, above).
+
+1. lean-bsp: contract 1.2, `[[bsp.nvm_regions]]` and the geometry defines,
+   under test.
+2. `lean-bsp-nucleo-u5a5` and `lean-bsp-nucleo-l552` move to 1.2 and offer
+   bank 2 as region 0 (`flash_read`, `flash_erase`, `flash_write`): the
+   flash controller's erase and program sequences move out of lean-ftl's
+   `target/stm32/stm32{u5,l5}-accessors.c` into the BSPs, which mention
+   lean-ftl nowhere. Their linker scripts keep bank 2 out of the image and
+   place `.bsp_nvm0` there, loading nothing there (lean-hwbridge's STM32
+   load still erases the whole flash, bank 2 included).
+3. lean-ftl as a lean-bsp application: an `app.toml` and one glue file that
+   maps the test library's hooks and its `nvm_erase`/`nvm_write`/`nvm_read`
+   onto `bsp_api.h`, takes the geometry from `LEAN_BSP_NVM0_*` instead of
+   `LFTL_STM32U5`/`LFTL_STM32L5`, places the test's flash data in
+   `.bsp_nvm0`, and runs the suite from `app_main`, with `HAS_PRINTF`: a
+   lean-bsp build prints its results. The CMake build and the release stay
+   as they are, for lean-ftl's users on any CPU.
+4. Regression check: `Callbacks test PASS` and `Tests 1 to 45 PASSED` on
+   both boards through lean-bsp, as the testbenches gave at lean-ftl's
+   cd3d0fa (the U5A5 now runs at 160 MHz instead of 4).
+5. Cross-reuse proof: hello-world, and cm-trace on `nucleo-u5a5`, still run
+   on the two BSPs with bank 2 kept out.
+6. The testbench repos are retired as `cm-trace-stm32f207` was (README
+   pointing to the lean-bsp build, then archived by the owner), and
+   lean-ftl drops ch32v307 (its target, toolchain files, build steps and
+   documentation rows).
+7. The numbers: the testbenches' size against the glue's, written up here.
+
+Where the migration stands:
+
+1. Done: contract 1.2 and `[[bsp.nvm_regions]]`, with their tests.
+2. Done, on hardware: both BSPs offer bank 2 as region 0, the sequences in
+   their `src/bsp_nvm.c`.
+3. Done: lean-ftl's `app.toml`, `lean-bsp/lftl_lean_bsp.c` (about 60
+   lines), and two small changes to the test library's headers (the
+   geometry from `LEAN_BSP_NVM0_*`, the flash data in `.bsp_nvm0`).
+4. Done: `Callbacks test PASS` and `Tests 1 to 45 PASSED` on both boards
+   through lean-bsp. The suite takes about 30 s on the U5A5 at 160 MHz, down
+   from about 7 minutes on the 4 MHz testbench.
+5. Done in part: hello-world runs on both BSPs and sees the region; cm-trace
+   builds for and passes `lbsp check` on `nucleo-u5a5`, not yet traced.
+6. To do.
+7. To do.
+
+Out of scope for now: the three board experiments under `test/boards/`
+(zeros over zeros, torn erase, erase time), which are pasted into a
+testbench's `main.c` today; and an NMI handler that lets EWLF reads survive
+an ECC error, which neither the testbenches nor the BSPs have.
 
 ## Critical files referenced by this design
 

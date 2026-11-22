@@ -169,6 +169,32 @@ def test_cores_and_each_target_s_core_are_shown(workspace, capfd):
     assert 'core:        big x2 (fake-cpu)' in out and '(on core big, cpu fake-cpu' in out
 
 
+def make_bsp_1_2_with_a_region(workspace):
+    from leanbsp.compat import canonical_header
+    toml = workspace.bsp / 'bsp.toml'
+    text = toml.read_text().replace('lean_bsp_contract_version = "1.0"', 'lean_bsp_contract_version = "1.2"')
+    text = text.replace('[[bsp.targets]]', '[[bsp.nvm_regions]]\nname = "data"\nbase = 0x10000\nsize = 0x4000\n'
+                        'page_size = 2048\nwrite_size = 8\n\n[[bsp.targets]]', 1)
+    toml.write_text(text)
+    (workspace.bsp / 'include' / 'bsp_api.h').write_bytes(canonical_header('1.2'))
+
+
+def test_nvm_regions_are_shown_and_reach_the_build(workspace, capfd):
+    make_bsp_1_2_with_a_region(workspace)
+    assert main(['show-bsp', 'fake']) == 0
+    assert 'nvm region:  data at 0x00010000, 16 KiB, pages of 2048 bytes, writes of 8' in capfd.readouterr().out
+    assert main(['capabilities', '--json']) == 0
+    assert json.loads(capfd.readouterr().out)['nvm_regions'] == [
+        {'name': 'data', 'base': 0x10000, 'size': 0x4000, 'page_size': 2048, 'write_size': 8, 'zero_overwrite': False}]
+    assert main(['build']) == 0
+    app_json = json.loads((bdir_of(workspace) / '.lean-bsp' / 'app.json').read_text())
+    assert app_json['defines'] == [
+        'LEAN_BSP_NVM_REGIONS=1', 'LEAN_BSP_NVM0_BASE=0x00010000', 'LEAN_BSP_NVM0_SIZE=0x4000',
+        'LEAN_BSP_NVM0_PAGE_SIZE=2048', 'LEAN_BSP_NVM0_WRITE_SIZE=8', 'LEAN_BSP_NVM0_ZERO_OVERWRITE=0',
+        'FROM_APP=1', 'OVERRIDDEN=app',
+    ]
+
+
 def test_doctor(workspace, capfd):
     assert main(['doctor']) == 0
     assert 'fake: ok' in capfd.readouterr().out

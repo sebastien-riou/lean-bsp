@@ -113,10 +113,20 @@ def cmd_show_bsp(args) -> int:
     print(f'contract:    {bsp.contract_version}')
     for c in bsp.cores:
         print(f'core:        {_core_line(c)}')
+    for r in bsp.nvm_regions:
+        print(f'nvm region:  {_nvm_line(r)}')
     for t in bsp.targets:
         primitives = ', '.join(k for k, v in t.primitives.items() if v)
         print(f'target:      {t.name} ({_on_core(t)}cpu {t.cpu}, {t.toolchain}, {t.run_mode}): {primitives}')
     return 0
+
+
+def _nvm_line(region) -> str:
+    """One NVM region: `bank2 at 0x08200000, 2048 KiB, pages of 8192 bytes, writes of 16, zero overwrite`."""
+    size = f'{region.size // 1024} KiB' if region.size % 1024 == 0 else f'{region.size} bytes'
+    overwrite = ', zero overwrite' if region.zero_overwrite else ''
+    return (f'{region.name} at 0x{region.base:08X}, {size}, pages of {region.page_size} bytes, '
+            f'writes of {region.write_size}{overwrite}')
 
 
 def _core_line(core) -> str:
@@ -244,6 +254,11 @@ def cmd_capabilities(args) -> int:
             {'id': c.id, 'cpu': c.cpu, 'cflags': c.cflags, 'count': c.count, 'description': c.description}
             for c in bsp.cores
         ],
+        'nvm_regions': [
+            {'name': r.name, 'base': r.base, 'size': r.size, 'page_size': r.page_size, 'write_size': r.write_size,
+             'zero_overwrite': r.zero_overwrite}
+            for r in bsp.nvm_regions
+        ],
         'targets': [
             {
                 'name': t.name,
@@ -264,6 +279,8 @@ def cmd_capabilities(args) -> int:
     print(f'{bsp.name} {bsp.version} (contract {bsp.contract_version}): {bsp.description}')
     for c in bsp.cores:
         print(f'  core {_core_line(c)}')
+    for r in bsp.nvm_regions:
+        print(f'  nvm region {_nvm_line(r)}')
     for t in bsp.targets:
         supported = ', '.join(k for k, v in t.primitives.items() if v) or 'none'
         print(f'  target {t.name}: {_on_core(t)}cpu {t.cpu}, {t.toolchain}, {t.run_mode}; primitives: {supported}')
