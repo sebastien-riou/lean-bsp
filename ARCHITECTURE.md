@@ -1418,8 +1418,11 @@ Where the migration stands:
    its own (a page program puts all its bytes in flight at once), a write to
    a destination that does not read erased is refused, and erases are
    verified, as lean-ftl's flash analysis asks.
-5. Done in part: hello-world runs on both BSPs and sees the region; cm-trace
-   builds for and passes `lbsp check` on `nucleo-u5a5`, not yet traced.
+5. Done: hello-world runs on both BSPs and sees the region; cm-trace traces
+   on `nucleo-u5a5` through lean-bsp, and its traces of `umul64` (16- and
+   32-bit operands) and `loop64` (32 iterations, 519 instructions, 633
+   cycles) are identical, every column of `cmtrace-dump`, to those taken
+   with the BSP as it was before the NVM change.
 6. Half done. The two testbench READMEs say they are deprecated and point to
    the lean-bsp build; lean-ftl dropped ch32v307 (its target and toolchain
    files, its build steps, its geometry in the test library, its rows and
