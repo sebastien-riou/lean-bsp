@@ -210,8 +210,8 @@ one thing it has on Cortex-M and not there. The entry is fixed code, so the
 contract's one-cycle step holds: `pico2` checks it on its Hazard3 cores
 and its Cortex-M33, which share one timer, the RP2350's RISC-V platform
 timer (64 bits, so any 32-bit count). All the phase-1
-BSPs moved to 1.1; `nucleo-f207` and `pico2` (both targets) offer the cycle
-timer so far.
+BSPs moved to 1.1; `nucleo-f207`, `nucleo-u5a5` (both on TIM5) and `pico2`
+(both targets) offer the cycle timer so far.
 
 ### The glue sequence
 
