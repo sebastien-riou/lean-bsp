@@ -1412,7 +1412,12 @@ Where the migration stands:
    from about 7 minutes on the 4 MHz testbench.
 5. Done in part: hello-world runs on both BSPs and sees the region; cm-trace
    builds for and passes `lbsp check` on `nucleo-u5a5`, not yet traced.
-6. To do.
+6. Half done. The two testbench READMEs say they are deprecated and point to
+   the lean-bsp build; lean-ftl dropped ch32v307 (its target and toolchain
+   files, its build steps, its geometry in the test library, its rows and
+   mentions in the documentation; the Linux simulator keeps the 4 KB/2-byte
+   geometry, the smallest write unit the tests cover). To do by the owner:
+   archive the two testbench repositories.
 7. To do.
 
 Out of scope for now: the three board experiments under `test/boards/`
