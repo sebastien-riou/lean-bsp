@@ -201,8 +201,17 @@ counts the core clock there, with the handler placed in a RAM copy of the
 vector table rather than by editing the vendor startup file. A Cortex-M BSP
 could also build it on the DWT comparator and DebugMonitor, as
 `libcmtrace/source/dwt.c` does, but that one refuses to run once a debugger
-has left halting debug enabled, which every ST-LINK reset does. All the
-phase-1 BSPs moved to 1.1; only `nucleo-f207` offers the cycle timer so far.
+has left halting debug enabled, which every ST-LINK reset does. On RISC-V,
+where a trap saves nothing, `handler` stays a plain C function: the BSP's
+trap entry saves the registers a call may change and calls it, so the same
+handler serves every core. The interrupted pc is `mepc`, which the handler
+may read and rewrite; the interrupted registers are out of its reach, the
+one thing it has on Cortex-M and not there. The entry is fixed code, so the
+contract's one-cycle step holds: `pico2` checks it on its Hazard3 cores
+and its Cortex-M33, which share one timer, the RP2350's RISC-V platform
+timer (64 bits, so any 32-bit count). All the phase-1
+BSPs moved to 1.1; `nucleo-f207` and `pico2` (both targets) offer the cycle
+timer so far.
 
 ### The glue sequence
 
