@@ -18,7 +18,7 @@ from pathlib import Path
 from leanbsp.backends.board import BuildError
 from leanbsp.manifest import Target
 
-OPTIMISATION = ['-Og', '-g']
+OPTIMISATION = ('-Og', '-g')  # the default: debuggable, and what the cycle counts in the READMEs were taken with
 
 
 def cross_prefix(target: Target) -> str:
@@ -37,17 +37,23 @@ def cross_prefix(target: Target) -> str:
 
 def build(app: dict, target: Target, bdir: Path, *, root: Path, sources: Iterable[Path],
           include_dirs: Iterable[Path], defines: Iterable[str], linker_script: Path,
-          link_flags: Iterable[str] = ()) -> dict:
-    """Compile and link; the application's own linker script, if any, replaces `linker_script`."""
+          link_flags: Iterable[str] = (), optimisation: Iterable[str] = OPTIMISATION,
+          board_flags: Iterable[str] = ()) -> dict:
+    """Compile and link; the application's own linker script, if any, replaces `linker_script`.
+
+    Objects are linked in the order of `sources`, then the application's: a BSP whose startup code
+    must come first lists it first. `optimisation` replaces -Og -g, for a board whose code must fit
+    a small memory. `board_flags` go to the BSP's sources only, not to the application's: what vendor
+    code needs to compile as its vendor builds it (a C standard, the signedness of char)."""
     prefix = cross_prefix(target)
     cc = f'{prefix}gcc'
     obj_dir = bdir / 'obj'
     obj_dir.mkdir(parents=True, exist_ok=True)
-    common = [*target.cflags, *OPTIMISATION, '-Wall', '-fdata-sections', '-ffunction-sections']
+    common = [*target.cflags, *optimisation, '-Wall', '-fdata-sections', '-ffunction-sections']
     board = [*common, *(f'-D{d}' for d in defines), *(f'-I{d}' for d in include_dirs)]
     application = [*board, *(f'-I{d}' for d in app['include_dirs']), *(f'-D{d}' for d in app['defines'])]
     app_sources = [Path(s) for s in app['sources']]
-    units = [(Path(s), board) for s in sources] + [(s, application) for s in app_sources]
+    units = [(Path(s), [*board, *board_flags]) for s in sources] + [(s, application) for s in app_sources]
 
     def compile_one(unit):
         src, flags = unit

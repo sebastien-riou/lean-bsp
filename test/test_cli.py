@@ -151,6 +151,24 @@ def test_capabilities_merges_static_and_dynamic(workspace, capfd):
     assert caps['dynamic'] == {'fake': True}
 
 
+def test_cores_and_each_target_s_core_are_shown(workspace, capfd):
+    toml = workspace.bsp / 'bsp.toml'
+    text = toml.read_text().replace('[[bsp.targets]]', '[[bsp.cores]]\nid = "big"\ncpu = "fake-cpu"\ncount = 2\n'
+                                    'description = "the application cores"\n\n[[bsp.targets]]\ncore_id = "big"', 1)
+    toml.write_text(text)
+    assert main(['capabilities']) == 0
+    out = capfd.readouterr().out
+    assert 'core big x2 (fake-cpu): the application cores' in out and 'target only: on core big, cpu fake-cpu' in out
+    assert main(['capabilities', '--json']) == 0
+    caps = json.loads(capfd.readouterr().out)
+    assert caps['cores'] == [{'id': 'big', 'cpu': 'fake-cpu', 'cflags': None, 'count': 2,
+                              'description': 'the application cores'}]
+    assert caps['targets'][0]['core_id'] == 'big'
+    assert main(['show-bsp', 'fake']) == 0
+    out = capfd.readouterr().out
+    assert 'core:        big x2 (fake-cpu)' in out and '(on core big, cpu fake-cpu' in out
+
+
 def test_doctor(workspace, capfd):
     assert main(['doctor']) == 0
     assert 'fake: ok' in capfd.readouterr().out

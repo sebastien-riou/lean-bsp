@@ -66,6 +66,58 @@ flash_write = true
         bsp.target('sram')
 
 
+MULTI_CORE = """
+[[bsp.cores]]
+id = "e51"
+cpu = "rv64imac"
+description = "monitor hart"
+
+[[bsp.cores]]
+id = "u54"
+cpu = "rv64gc"
+cflags = ["-march=rv64gc", "-mabi=lp64d"]
+count = 4
+
+[[bsp.targets]]
+name = "e51"
+core_id = "e51"
+toolchain = "riscv-none-elf"
+cflags = ["-march=rv64imac", "-mabi=lp64"]
+run_mode = "auto-after-load"
+
+[[bsp.targets]]
+name = "u54"
+core_id = "u54"
+toolchain = "riscv-none-elf"
+run_mode = "auto-after-load"
+"""
+
+
+def test_cores_are_kept_as_the_board_description(tmp_path):
+    bsp = load_bsp(write_bsp(tmp_path, MULTI_CORE))
+    e51, u54 = bsp.cores
+    assert (e51.id, e51.cpu, e51.cflags, e51.count, e51.description) == ('e51', 'rv64imac', None, 1, 'monitor hart')
+    assert (u54.id, u54.count) == ('u54', 4)
+    # a core without cflags gives its targets none; the target's own are used
+    assert bsp.target('e51').cflags == ['-march=rv64imac', '-mabi=lp64'] and bsp.target('e51').core_id == 'e51'
+    assert bsp.target('u54').cflags == ['-march=rv64gc', '-mabi=lp64d'] and bsp.target('u54').cpu == 'rv64gc'
+
+
+@pytest.mark.parametrize(
+    ('cores', 'message'),
+    [
+        ('[[bsp.cores]]\nid = "a"\n[[bsp.cores]]\nid = "a"\n', "duplicate core id 'a'"),
+        ('[[bsp.cores]]\nid = "a"\ncount = 0\n', 'count must be a positive integer'),
+        ('[[bsp.cores]]\nid = "a"\ncount = true\n', 'count must be a'),
+        ('[[bsp.cores]]\nid = "a"\ncflags = "-O2"\n', 'cflags must be a list'),
+    ],
+)
+def test_invalid_cores(tmp_path, cores, message):
+    target = '[[bsp.targets]]\nname = "t"\ncpu = "x"\ntoolchain = "gcc"\nrun_mode = "manual"\n'
+    with pytest.raises(LeanBspError, match=message):
+        load_bsp(write_bsp(tmp_path, cores + target))
+
+
 @pytest.mark.parametrize(
     ('targets', 'message'),
     [

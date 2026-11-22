@@ -115,6 +115,29 @@ def test_build_compiles_links_and_records(bench, capsys):
     assert board.read_state(bdir)['elf'] == str(bdir / 'demo.elf')
 
 
+def test_build_links_in_source_order_with_the_bsp_s_optimisation(bench, capsys):
+    described, _, app_json, bdir, calls = bench
+    root = described.root
+    for name in ('entry.S', 'zz_first.c', 'aa_second.c'):
+        (root / 'src' / name).write_text('')
+    ordered = [root / 'src' / 'entry.S', root / 'src' / 'zz_first.c', root / 'src' / 'aa_second.c']
+
+    def build(app, target, bdir):
+        return gcc.build(app, target, bdir, root=root, sources=ordered, include_dirs=[], defines=[],
+                         linker_script=root / 'board.ld', link_flags=['-nostartfiles'], optimisation=['-Os'],
+                         board_flags=['-std=gnu11'])
+
+    argv = ['build', '--app-json', str(app_json), '--target', 'cortex-m0', '--bdir', str(bdir)]
+    assert board.main(described, build, argv) == 0
+    compiles = [c for c in calls() if c[0] == 'fake-none-eabi-gcc' and '-c' in c]
+    assert all('-Os' in c and '-Og' not in c for c in compiles)
+    assert {Path(c[-3]).name: '-std=gnu11' in c for c in compiles} == {
+        'entry.S': True, 'zz_first.c': True, 'aa_second.c': True, 'main.c': False}  # not for the application
+    link = next(c for c in calls() if c[0] == 'fake-none-eabi-gcc' and '-c' not in c)
+    objects = [Path(a).name.rsplit('-', 1)[0] for a in link if a.endswith('.o')]
+    assert objects == ['entry', 'zz_first', 'aa_second', 'main'] and '-nostartfiles' in link
+
+
 def test_build_failure_is_an_error_result(bench, capsys, tmp_path):
     described, build, app_json, bdir, _ = bench
     app = json.loads(app_json.read_text())

@@ -32,12 +32,17 @@ This project provides a python package including a CLI to build an application g
 
 ## Usage
 
-Install from a clone (Python 3.11 or later, no runtime dependencies); this provides both `lean-bsp` and its short
-form `lbsp`:
+Install from a clone (Python 3.11 or later, no runtime dependencies) with [pipx](https://pipx.pypa.io); this
+provides both `lean-bsp` and its short form `lbsp`, and, being editable, follows the clone as it changes:
 
 ````
-pip install -e .
+pipx install --editable .
 ````
+
+pipx keeps lean-bsp in its own virtual environment, which is what a system Python that refuses `pip install`
+(PEP 668: "externally-managed-environment", as on Ubuntu 24.04) expects. Inside a virtual environment of your own,
+`pip install -e .` does the same. lean-bsp runs the BSPs' Python entry points with its own interpreter, so they
+find its helpers (`leanbsp.backends`) either way.
 
 Then, from inside an application repository (one with an `app.toml`), with its BSPs cloned next to it:
 
@@ -73,6 +78,7 @@ They are cloned at the same level as this one.
   [`lean-bsp-nucleo-l552`](https://github.com/sebastien-riou/lean-bsp-nucleo-l552),
   [`lean-bsp-nucleo-u5a5`](https://github.com/sebastien-riou/lean-bsp-nucleo-u5a5),
   [`lean-bsp-numaker-m5531`](https://github.com/sebastien-riou/lean-bsp-numaker-m5531),
-  [`lean-bsp-pico2`](https://github.com/sebastien-riou/lean-bsp-pico2)
+  [`lean-bsp-pico2`](https://github.com/sebastien-riou/lean-bsp-pico2),
+  [`lean-bsp-mpfs-disco-kit`](https://github.com/sebastien-riou/lean-bsp-mpfs-disco-kit)
 - [`lean-hwbridge`](https://github.com/sebastien-riou/lean-hwbridge): how the board BSPs' `load` and `run`
   reach the boards' power, serial ports and debug probes, from a sandboxed session or another machine

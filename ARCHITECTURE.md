@@ -333,15 +333,17 @@ Nothing checks that such pairs are compatible.
 ### AMP SoCs with multiple cores
 
 Some SoCs are AMP (Asymmetric Multi Processor): multiple cores, not all of
-the same type, and/or with access to different resources. SMP (identical
-cores with identical resource access) needs no special handling and is out
-of scope here. For AMP, lean-bsp's scope is deliberately narrow: **exactly
-one core is active at a time**; any sibling core of the chosen target is
-left in its low-power/parked boot state. Concurrent multi-core execution
-(more than one core running application code at once, with the
-inter-core coordination that implies) is out of scope.
+the same type, and/or with access to different resources. lean-bsp's scope
+for them is deliberately narrow: **exactly one core runs the application**,
+the one the chosen `target` names. The BSP may run code of its own on the
+other cores, where the board cannot do without it (below); otherwise they
+are left in their low-power/parked boot state. Out of scope: more than one
+core running application code at once (several applications, or one
+application spanning cores, with the inter-core coordination that implies),
+and SMP (several identical cores running one program).
 
-This is already how the RP2350 is handled today, confirmed in
+The simplest case needs nothing on the other cores, and is how the RP2350 is
+handled today, confirmed in
 `../crypto-benchmark-rp2350/`. That chip has 2
 Cortex-M33 and 2 RV32IMC (Hazard3) cores, of which only one pair — and
 within it, only one core — is ever active for this project. A single BSP
@@ -373,9 +375,52 @@ different memory map) and in a `primitives_override` table (different
 peripheral/resource access) — both already part of the `bsp.toml` schema in
 §5.
 
+#### Cores that cannot run alone: companion code
+
+On some boards the core an application wants cannot start by itself:
+
+- **PolarFire SoC** (one E51 monitor hart, four U54 application harts): the
+  E51 always boots first, sets up clocks, DDR and I/O, and is the one that
+  wakes a U54.
+- **STM32H745** (a Cortex-M7 and a Cortex-M4 sharing one flash): each core
+  boots from its own flash address, and the M7 normally sets up clocks and
+  power for the M4.
+
+The rule above still holds: one core runs the application. What the other
+cores must run to make that possible is **companion code**, and it is the
+BSP's: it has no application hooks, prints nothing, brings the board up,
+starts the application core, then parks. The BSP's own `build` and `load`
+produce and load it together with the application, so lean-bsp never sees a
+second application, `bsp_api.h` gains nothing, and an application is the
+same portable library on such a board as on any other. UART 0, the LEDs and
+buttons, the tick and `bsp_reset()` belong to the application core;
+`bsp_reset()` restarts the whole board, companions included.
+
+Companion code comes in two shapes:
+
+| Shape | Example | What the BSP's `build` produces |
+|---|---|---|
+| Same image | PolarFire SoC: Microchip's HAL is one program for all harts, which dispatches on the hart's number | one ELF: the application's hart runs `app_main`, the E51 runs the HAL's hardware setup and wakes it |
+| Separate images | STM32H745: the two cores differ in CPU flags and flash address | the application's ELF, plus the BSP's own ELF for the other core |
+
+The same-image shape needs nothing new from lean-bsp or from the loading
+tools. The separate-images shape needs a build result that carries several
+images and a loader that writes them in one operation, since a second
+load would otherwise erase the first; both are added with the first board
+that needs them.
+
+On PolarFire SoC, one consequence of the same-image shape is accepted as
+Microchip's own arrangement: for a U54 target the whole ELF is compiled for
+the U54 (rv64gc), including the HAL code the E51 executes. That code uses no
+floating point, and an instruction the E51 lacks traps at once.
+
+#### Describing the cores
+
 `targets` alone is enough for lean-bsp's own operations (build, load,
 run, compatibility checking) — it never needs anything more than the target
-list. The optional `[[bsp.cores]]` catalog exists one level up, for two
+list. The optional `[[bsp.cores]]` catalog exists one level up: it describes
+the board's cores (`id`, `cpu`, `cflags`, `count`, `description`), and a
+target's `core_id` names the one its application runs on. That serves two
 things `targets` doesn't do on its own:
 
 - **Avoiding duplicated metadata when the same physical core has more than
@@ -395,21 +440,20 @@ things `targets` doesn't do on its own:
   cores" as its own piece of information, without waiting for every core to
   gain a corresponding buildable target.
 
-`[[bsp.cores]]` is optional, forward-looking metadata for boards that hit
-one of the two cases above — not something every BSP must populate. RP2350
+`[[bsp.cores]]` is optional — not something every BSP must populate. RP2350
 doesn't need it (its two `targets` are already fully self-describing, each
-with its own `cpu`); the same-arch AMP example and the NOR/QSPI boot-source
-example both do.
+with its own `cpu`); a board with companion code, the same-arch AMP example
+and the NOR/QSPI boot-source example all gain from it.
 
-Whichever sub-case applies, parking the sibling core(s) remains the chosen
-`target`'s own startup-code responsibility — simply never starting them,
-exactly as the RP2350 BSP already does by omission. It is not a contract
-primitive `bsp_api.h` needs to define, since concurrent multi-core execution
-is out of scope.
+Whichever case applies, what the other cores do — stay unstarted, as on the
+RP2350, or run the BSP's companion code and then park — is the BSP's
+responsibility for the chosen `target`. It is not a contract primitive
+`bsp_api.h` needs to define, since only one core runs the application.
 
-Two illustrative `bsp.toml` fragments — the RP2350 case (targets
-disambiguated by architecture) and a hypothetical same-arch AMP case
-(targets disambiguated by `core_id` and resource overrides):
+Three illustrative `bsp.toml` fragments — the RP2350 case (targets
+disambiguated by architecture), PolarFire SoC (companion code, same image)
+and a hypothetical same-arch AMP case (targets disambiguated by `core_id`
+and resource overrides):
 
 ```toml
 # RP2350: two cores of different architectures, same BSP repo
@@ -428,6 +472,34 @@ cpu = "rv32imcb"                     # the name apps already use for this core's
 toolchain = "riscv-none-elf"
 cflags = ["-march=rv32imac_zicsr_zifencei_zba_zbb_zbs_zbkb", "-mabi=ilp32"]
 linker_fragments = ["memory-riscv.ld"]
+run_mode = "auto-after-load"
+```
+
+```toml
+# PolarFire SoC: the application on the E51, or on the first U54 with the E51 as its companion
+[[bsp.cores]]
+id = "e51"
+cpu = "rv64imac"
+description = "monitor hart: boots first, sets the board up, wakes the others"
+
+[[bsp.cores]]
+id = "u54"
+cpu = "rv64gc"
+count = 4
+description = "application harts, started by the E51"
+
+[[bsp.targets]]
+name = "e51"
+core_id = "e51"
+toolchain = "riscv-none-elf"
+cflags = ["-march=rv64imac_zicsr_zifencei", "-mabi=lp64", "-mcmodel=medany", "-mstrict-align"]
+run_mode = "auto-after-load"
+
+[[bsp.targets]]
+name = "u54"                         # hart 1; harts 2 to 4 stay parked
+core_id = "u54"
+toolchain = "riscv-none-elf"
+cflags = ["-march=rv64gc", "-mabi=lp64d", "-mcmodel=medany", "-mstrict-align"]
 run_mode = "auto-after-load"
 ```
 
@@ -633,7 +705,7 @@ requires a BSP to use them:
 ```toml
 [bsp]
 name = "linux-host"
-lean_bsp_contract_version = "1.0"    # version of the app_*/bsp_* contract this BSP implements
+lean_bsp_contract_version = "1.1"    # version of the app_*/bsp_* contract this BSP implements
 version = "0.3.0"
 description = "Run/debug apps as a native Linux process"
 maintainer = "sebastien.riou@pqshield.com"
@@ -673,7 +745,7 @@ cflags = []                          # CPU/ABI flags for every object linked int
                                      # the application's own library included
 linker_fragments = []                # standard-named linker-script include files this target provides
 run_mode = "native-process"          # native-process | auto-after-load | debugger-attach | manual | emulator
-# core_id = "core0"                  # optional: references an entry in [[bsp.cores]], for AMP boards
+# core_id = "core0"                  # optional: the [[bsp.cores]] entry the application runs on, for AMP boards
                                      # where target identity isn't fully captured by name/cpu alone;
                                      # the target then inherits cpu and cflags from that core
 # [bsp.targets.primitives_override]
@@ -709,7 +781,7 @@ have.
 ```toml
 [app]
 name = "hello-world"
-lean_bsp_contract_version = "1.0"
+lean_bsp_contract_version = "1.1"
 version = "0.1.0"
 default_bsp = "linux-host"           # optional: which BSP to use when --bsp is not given
 
@@ -1036,7 +1108,7 @@ lean-bsp/
       cmake_generic.py      # later phase: the legacy repos' shared CMake scaffold
     data/
       registry.toml         # built-in known-BSP list
-      contract/1.0/bsp_api.h  # canonical header, one directory per contract version
+      contract/<version>/bsp_api.h  # canonical header, one directory per contract version (1.0, 1.1)
   test/
     conftest.py             # a throwaway workspace: an app repo next to a cloned fake BSP
     test_manifest.py
@@ -1077,9 +1149,9 @@ which imports the ELF lean-bsp builds and finds the application's, the
 BSP's and the HAL's sources through its debug information (that BSP's
 README has the steps). The IDE debugs; lean-bsp keeps building.
 
-Phase 1 covers applications given as source files only. `[app.build]`,
-`[[bsp.cores]]` and `lean-bsp registry add` wait for the phases that need
-them.
+Phase 1 covers applications given as source files only. `[app.build]` and
+`lean-bsp registry add` wait for the phases that need them; `[[bsp.cores]]`
+arrived with the first board that has companion code (§3).
 
 **cm-trace** It has only one real BSP (`cm-trace-stm32f207`), and its
 existing override mechanism — weak `cmtrace_com_tx`/`cmtrace_com_rx`/

@@ -111,10 +111,23 @@ def cmd_show_bsp(args) -> int:
     print(f'cloned:      {path}')
     print(f'version:     {bsp.version}')
     print(f'contract:    {bsp.contract_version}')
+    for c in bsp.cores:
+        print(f'core:        {_core_line(c)}')
     for t in bsp.targets:
         primitives = ', '.join(k for k, v in t.primitives.items() if v)
-        print(f'target:      {t.name} (cpu {t.cpu}, {t.toolchain}, {t.run_mode}): {primitives}')
+        print(f'target:      {t.name} ({_on_core(t)}cpu {t.cpu}, {t.toolchain}, {t.run_mode}): {primitives}')
     return 0
+
+
+def _core_line(core) -> str:
+    """One of the board's kinds of core: `u54 x4 (rv64gc): application harts`."""
+    count = f' x{core.count}' if core.count > 1 else ''
+    cpu = f' ({core.cpu})' if core.cpu else ''
+    return f'{core.id}{count}{cpu}' + (f': {core.description}' if core.description else '')
+
+
+def _on_core(target) -> str:
+    return f'on core {target.core_id}, ' if target.core_id else ''
 
 
 def cmd_fetch(args) -> int:
@@ -227,9 +240,14 @@ def cmd_capabilities(args) -> int:
         'contract_version': bsp.contract_version,
         'description': bsp.description,
         'path': str(bsp.root),
+        'cores': [
+            {'id': c.id, 'cpu': c.cpu, 'cflags': c.cflags, 'count': c.count, 'description': c.description}
+            for c in bsp.cores
+        ],
         'targets': [
             {
                 'name': t.name,
+                'core_id': t.core_id,
                 'cpu': t.cpu,
                 'toolchain': t.toolchain,
                 'cflags': t.cflags,
@@ -244,9 +262,11 @@ def cmd_capabilities(args) -> int:
         print(json.dumps(merged, indent=2))
         return 0
     print(f'{bsp.name} {bsp.version} (contract {bsp.contract_version}): {bsp.description}')
-    for t in merged['targets']:
-        supported = ', '.join(k for k, v in t['primitives'].items() if v) or 'none'
-        print(f'  target {t["name"]}: cpu {t["cpu"]}, {t["toolchain"]}, {t["run_mode"]}; primitives: {supported}')
+    for c in bsp.cores:
+        print(f'  core {_core_line(c)}')
+    for t in bsp.targets:
+        supported = ', '.join(k for k, v in t.primitives.items() if v) or 'none'
+        print(f'  target {t.name}: {_on_core(t)}cpu {t.cpu}, {t.toolchain}, {t.run_mode}; primitives: {supported}')
     for k, v in merged['dynamic'].items():
         print(f'  {k}: {v}')
     return 0

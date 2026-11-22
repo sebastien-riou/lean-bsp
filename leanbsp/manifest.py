@@ -67,6 +67,17 @@ def _primitives(table: dict, path: Path, where: str) -> dict[str, bool]:
 
 
 @dataclass
+class Core:
+    """A kind of core the board has, whether or not a target builds for it."""
+
+    id: str
+    cpu: str | None
+    cflags: list[str] | None
+    count: int  # how many of them the board has
+    description: str
+
+
+@dataclass
 class Target:
     name: str
     cpu: str
@@ -74,7 +85,7 @@ class Target:
     cflags: list[str]
     linker_fragments: list[str]
     run_mode: str
-    core_id: str | None
+    core_id: str | None  # the core the application runs on, when the BSP describes its cores
     primitives: dict[str, bool]  # effective: BSP defaults merged with this target's override
 
 
@@ -89,6 +100,7 @@ class Bsp:
     requires_tools: list[str]
     setup_steps: list[str]
     primitives: dict[str, bool]
+    cores: list[Core]
     targets: list[Target]
 
     def target(self, name: str | None) -> Target:
@@ -113,13 +125,22 @@ def load_bsp(root: Path) -> Bsp:
     defaults = {p: False for p in PRIMITIVES}
     defaults.update(_primitives(_get(bsp, 'primitives', path, 'bsp', dict, {}), path, 'bsp.primitives'))
 
-    cores = {}
+    cores: dict[str, Core] = {}
     for core in _get(bsp, 'cores', path, 'bsp', list, []):
         core_id = _get(core, 'id', path, 'bsp.cores')
-        cores[core_id] = {
-            'cpu': _get(core, 'cpu', path, f'bsp.cores[{core_id}]', str, None),
-            'cflags': _str_list(core, 'cflags', path, f'bsp.cores[{core_id}]', None),
-        }
+        where = f'bsp.cores[{core_id}]'
+        if core_id in cores:
+            raise LeanBspError(f'{path}: duplicate core id {core_id!r}')
+        count = _get(core, 'count', path, where, int, 1)
+        if isinstance(count, bool) or count < 1:
+            raise LeanBspError(f'{path}: {where}.count must be a positive integer')
+        cores[core_id] = Core(
+            id=core_id,
+            cpu=_get(core, 'cpu', path, where, str, None),
+            cflags=_str_list(core, 'cflags', path, where) if 'cflags' in core else None,
+            count=count,
+            description=_get(core, 'description', path, where, str, ''),
+        )
 
     targets: list[Target] = []
     for t in _get(bsp, 'targets', path, 'bsp', list):
@@ -128,15 +149,15 @@ def load_bsp(root: Path) -> Bsp:
         if any(existing.name == tname for existing in targets):
             raise LeanBspError(f'{path}: duplicate target name {tname!r}')
         core_id = _get(t, 'core_id', path, where, str, None)
-        core = {'cpu': None, 'cflags': None}
+        core = None
         if core_id is not None:
             if core_id not in cores:
                 raise LeanBspError(f'{path}: {where}.core_id {core_id!r} is not declared in [[bsp.cores]]')
             core = cores[core_id]
-        cpu = _get(t, 'cpu', path, where, str, core['cpu'])
+        cpu = _get(t, 'cpu', path, where, str, core.cpu if core else None)
         if cpu is None:
             raise LeanBspError(f'{path}: missing {where}.cpu')
-        cflags = _str_list(t, 'cflags', path, where, core['cflags'] if core['cflags'] is not None else [])
+        cflags = _str_list(t, 'cflags', path, where, core.cflags if core and core.cflags is not None else [])
         run_mode = _get(t, 'run_mode', path, where)
         if run_mode not in RUN_MODES:
             raise LeanBspError(f'{path}: {where}.run_mode must be one of {", ".join(RUN_MODES)}')
@@ -167,6 +188,7 @@ def load_bsp(root: Path) -> Bsp:
         requires_tools=_str_list(build, 'requires_tools', path, 'bsp.build', []),
         setup_steps=_str_list(setup, 'steps', path, 'bsp.setup', []),
         primitives=defaults,
+        cores=list(cores.values()),
         targets=targets,
     )
 

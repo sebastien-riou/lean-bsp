@@ -37,3 +37,9 @@ name = "pico2"
 git = "https://github.com/sebastien-riou/lean-bsp-pico2.git"
 description = "Raspberry Pi Pico 2 board (RP2350: Cortex-M33 and Hazard3 RISC-V targets)"
 tags = ["arm", "cortex-m33", "riscv", "rv32", "rp2350"]
+
+[[bsp]]
+name = "mpfs-disco-kit"
+git = "https://github.com/sebastien-riou/lean-bsp-mpfs-disco-kit.git"
+description = "Microchip PolarFire SoC Discovery Kit (MPFS095T: E51 and U54 RISC-V targets)"
+tags = ["riscv", "rv64", "polarfire-soc", "mpfs095t"]
