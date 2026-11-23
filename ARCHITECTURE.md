@@ -1412,7 +1412,9 @@ Where the migration stands:
 4. Done: `Callbacks test PASS` and `Tests 1 to 45 PASSED` on both boards
    through lean-bsp. The suite takes about 30 s on the U5A5 at 160 MHz, down
    from about 7 minutes on the 4 MHz testbench. Beyond the plan, the Pico 2
-   (`pico2`, on its Cortex-M33 and on its Hazard3) passes too: region 0 is the upper 2 MB of its
+   (`pico2`, on its Cortex-M33 and on its Hazard3) and the NuMaker-M5531
+   (`numaker-m5531`, APROM bank 1, one 64-bit program per 8-byte unit) pass
+   too. On the Pico 2: region 0 is the upper 2 MB of its
    QSPI flash, 8-byte write units without zero overwrite, so the suite's
    first board run of its no-pinning variant; each unit is programmed on
    its own (a page program puts all its bytes in flight at once), a write to
@@ -1444,7 +1446,8 @@ Where the migration stands:
    and 168 lines (`src/bsp_nvm.c`, `.h`), the flash sequences moved out of
    lean-ftl's accessors. The Pico 2 then came for 114 lines in
    `lean-bsp-pico2` and nothing in lean-ftl: a third board and its two
-   cores, for the cost of its flash driver.
+   cores, for the cost of its flash driver; the NuMaker-M5531 likewise, for
+   141 lines in `lean-bsp-numaker-m5531`.
 
 Out of scope for now: the three board experiments under `test/boards/`
 (zeros over zeros, torn erase, erase time), which are pasted into a
