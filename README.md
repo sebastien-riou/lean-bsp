@@ -2,6 +2,11 @@
 
 Framework to leverage generic BSPs in any project.
 
+| | |
+|---|---|
+| BSPs | [linux-host](https://github.com/sebastien-riou/lean-bsp-linux-host), [nucleo-f207](https://github.com/sebastien-riou/lean-bsp-nucleo-f207), [nucleo-l552](https://github.com/sebastien-riou/lean-bsp-nucleo-l552), [nucleo-u5a5](https://github.com/sebastien-riou/lean-bsp-nucleo-u5a5), [numaker-m5531](https://github.com/sebastien-riou/lean-bsp-numaker-m5531), [pico2](https://github.com/sebastien-riou/lean-bsp-pico2), [mpfs-disco-kit](https://github.com/sebastien-riou/lean-bsp-mpfs-disco-kit) |
+| Applications | [hello-world](https://github.com/sebastien-riou/lean-app-hello-world), [cm-trace](https://github.com/sebastien-riou/cm-trace), [lean-ftl](https://github.com/sebastien-riou/lean-ftl) |
+
 ## Concept
 
 - Application is built as a library with few unimplemented / weak symbols to handle hardware specific things.
