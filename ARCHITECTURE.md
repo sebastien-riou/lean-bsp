@@ -1434,7 +1434,7 @@ geometry, which lean-bsp passes to the application (contract 1.2, above).
    documentation rows).
 7. The numbers: the testbenches' size against the glue's, written up here.
 
-Where the migration stands:
+Where the migration stands: complete, every step done.
 
 1. Done: contract 1.2 and `[[bsp.nvm_regions]]`, with their tests.
 2. Done, on hardware: both BSPs offer bank 2 as region 0, the sequences in
@@ -1458,12 +1458,13 @@ Where the migration stands:
    32-bit operands) and `loop64` (32 iterations, 519 instructions, 633
    cycles) are identical, every column of `cmtrace-dump`, to those taken
    with the BSP as it was before the NVM change.
-6. Half done. The two testbench READMEs say they are deprecated and point to
-   the lean-bsp build; lean-ftl dropped ch32v307 (its target and toolchain
-   files, its build steps, its geometry in the test library, its rows and
-   mentions in the documentation; the Linux simulator keeps the 4 KB/2-byte
-   geometry, the smallest write unit the tests cover). To do by the owner:
-   archive the two testbench repositories.
+6. Done. `lean-ftl-stm32u5` and `lean-ftl-stm32l5` are archived; their
+   READMEs say they are deprecated and point to lean-ftl's lean-bsp build
+   on `lean-bsp-nucleo-u5a5` and `lean-bsp-nucleo-l552`. lean-ftl dropped
+   ch32v307 (its target and toolchain files, its build steps, its geometry
+   in the test library, its rows and mentions in the documentation; the
+   Linux simulator keeps the 4 KB/2-byte geometry, the smallest write unit
+   the tests cover).
 7. Done. The numbers, counting tracked files, the drivers apart. The two
    testbenches were 43 files each, 4,676 lines (U5A5) and 4,904 (L552),
    plus 103 and 109 driver files (9.9 and 8.6 MB), and linked a lean-ftl
@@ -1482,10 +1483,13 @@ Where the migration stands:
    cores, for the cost of its flash driver; the NuMaker-M5531 likewise, for
    141 lines in `lean-bsp-numaker-m5531`.
 
-Out of scope for now: the three board experiments under `test/boards/`
-(zeros over zeros, torn erase, erase time), which are pasted into a
-testbench's `main.c` today; and an NMI handler that lets EWLF reads survive
-an ECC error, which neither the testbenches nor the BSPs have.
+Left out, and still so: the three board experiments under lean-ftl's
+`test/boards/` (zeros over zeros, torn erase, erase time), which are still
+pasted into a copy of a testbench's `main.c`, now taken from an archived
+repository; and recovery from a flash ECC double error, which would let
+EWLF reads survive one. The two STM32 BSPs report that NMI on UART 0, call
+`app_on_fault`, and stop: lean-bsp makes test and demo firmware, so the
+BSPs do not recover, any more than the testbenches did.
 
 ## Critical files referenced by this design
 
