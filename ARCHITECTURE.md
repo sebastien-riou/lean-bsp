@@ -222,7 +222,8 @@ gains the two properties an FTL cannot work without, `write_size` (the
 program unit) and `zero_overwrite` (whether zeros may be programmed over a
 programmed unit), and the callbacks get their rules: what alignment they may
 assume, `BSP_NVM_OK`, and `BSP_NVM_REFUSED` for a program the flash refused
-without programming anything (lean-ftl's EWLF areas step over such a unit).
+without programming anything (lean-ftl's EWLF areas step over such a unit;
+1.3, below, corrects that last part).
 
 An application often needs the geometry at compile time, to lay its areas
 out. So the BSP declares its regions in `bsp.toml`:
@@ -245,7 +246,39 @@ start of region N without loading anything there, so that an application can
 place its data in a region at link time; at run time
 `bsp_get_capabilities()->nvm_regions` gives the same regions with their
 callbacks. A target offering `flash_read`, `flash_erase` or `flash_write`
-must declare at least one region, and only a 1.2 BSP may declare any.
+must declare at least one region, and only a BSP at contract 1.2 or later may
+declare any.
+
+### What a refused write leaves (1.3)
+
+Contract 1.3 changes only the comment on the status codes, and corrects 1.2
+there. 1.2 said a refused write programmed nothing. A flash controller that
+programs unit by unit, as the STM32U5's and STM32L5's do, cannot promise that:
+it refuses a unit that is not erased only when it reaches it, after the units
+below it in the same call are programmed. The two Nucleo BSPs never kept the
+1.2 promise. 1.3 says what they can keep:
+
+- `BSP_NVM_REFUSED` is the flash refusing to program a unit that is not
+  erased. `zero_overwrite` says when it may accept zeros there, not that it
+  always does: lean-ftl measured both parts refusing zeros over a unit that
+  already reads all zeros. Nothing is programmed at or above the refused unit;
+  the units of the call below it may be programmed, as a power cut there would
+  have left them. lean-ftl's EWLF and large areas step over the position.
+- Only a write returns it. An erase that fails returns a failure, as does a
+  write the controller stopped for any other reason (write protection, a
+  sequence or alignment error): an application must not step over those. On
+  the STM32U5 and STM32L5 a refusal sets PROGERR and PGSERR together, as
+  lean-ftl measured (its `FLASH.md`); the BSPs report any other flag, or
+  PGSERR alone, as a failure.
+
+1.3 weakens what an application may assume, which a minor version normally
+does not; it stays a minor version because no BSP that can produce the case
+ever met the 1.2 text, and lean-ftl, the only application using NVM, never
+relied on it. Every 1.2 BSP meets the 1.3 text: programming nothing is its
+strictest case. `lean-bsp-nucleo-u5a5` and `lean-bsp-nucleo-l552` implement
+1.3; `lean-bsp-numaker-m5531` and `lean-bsp-pico2`, which check that the
+whole destination reads erased before programming anything, stay on 1.2. So
+does lean-ftl's `app.toml`, so that all four BSPs serve it.
 
 ### The glue sequence
 
@@ -1151,7 +1184,7 @@ lean-bsp/
       cmake_generic.py      # later phase: the legacy repos' shared CMake scaffold
     data/
       registry.toml         # built-in known-BSP list
-      contract/<version>/bsp_api.h  # canonical header, one directory per contract version (1.0, 1.1)
+      contract/<version>/bsp_api.h  # canonical header, one directory per contract version (1.0 to 1.3)
   test/
     conftest.py             # a throwaway workspace: an app repo next to a cloned fake BSP
     test_manifest.py

@@ -5,7 +5,7 @@ from leanbsp.manifest import load_app, load_bsp
 
 
 def test_contracts_shipped():
-    assert {'1.0', '1.1', '1.2'} <= set(supported_contracts())
+    assert {'1.0', '1.1', '1.2', '1.3'} <= set(supported_contracts())
 
 
 def test_contract_1_1_adds_the_cycle_timer_to_1_0():
@@ -21,7 +21,20 @@ def test_contract_1_2_describes_the_nvm_regions_further():
     assert '#define LEAN_BSP_CONTRACT_VERSION "1.2"' in new
 
 
+def test_contract_1_3_changes_only_the_nvm_status_comment():
+    old, new = canonical_header('1.2').decode(), canonical_header('1.3').decode()
+    assert '#define LEAN_BSP_CONTRACT_VERSION "1.3"' in new
+    assert 'without programming anything' in old and 'without programming anything' not in new
+    assert 'nothing at or above the refused unit' in new and 'Only a write returns BSP_NVM_REFUSED' in new
+    # outside that comment, the header line and the version string, the code is 1.2's
+    def code(text):
+        return [line for line in text.splitlines() if not line.lstrip().startswith(('*', '/*'))
+                and 'LEAN_BSP_CONTRACT_VERSION' not in line]
+    assert code(old) == code(new)
+
+
 @pytest.mark.parametrize('bsp_version, app_version, serves', [
+    ('1.3', '1.2', True), ('1.2', '1.3', False),
     ('1.2', '1.1', True), ('1.1', '1.2', False), ('1.1', '1.0', True), ('1.1', '1.1', True), ('1.0', '1.1', False), ('2.0', '1.1', False), ('1.0', '1.0', True),
 ])
 def test_contract_serves_earlier_minor_versions(bsp_version, app_version, serves):
