@@ -1787,10 +1787,13 @@ Decisions taken:
    core 0 by 15 %), the Hazard3's counters running. Each BSP leaves at
    least the stack and heap its board repository does. `nucleo-u5a5` does:
    the same RAM region, 256 KiB of stack at its top, the heap up to it.
-   `numaker-m5531` has 124 KiB of stack at the top of DTCM, which the
-   owner set for both firmwares on 2026-11-27 (64 KiB before); MSPLIM
-   stops it there, so a library that paints 160 KiB faults on either side.
-   Its heap grows to the end of the SRAM region, as the board repository's
+   `numaker-m5531` has 256 KiB of stack at the start of SRAM, below the
+   data, in both firmwares, as the owner decided on 2026-11-27 after the
+   'before' round's mldsa-native ML-DSA-87 call faulted with 124 KiB at
+   the top of DTCM: lean-benchmark paints a 160 KiB window below the
+   caller to measure the stack, deeper than the library's own 112 KiB.
+   MSPLIM stops the stack at its bottom, and it stays in SRAM0, which the
+   start-up code pushes on before it powers SRAM1 and SRAM2. Its heap grows to the end of the SRAM region, as the board repository's
    `_sbrk` (libnosys's, without any limit) already lets it; wolfSSL's
    ML-DSA-87 needs 118 KiB. `pico2` does on both targets, with pico-sdk's linker script
    as it is: there, as under crypto-benchmark-rp2350's script, the stack
@@ -1880,15 +1883,23 @@ g. The differences are checked (step 5).
 So the baseline is taken in state c, not at the commits step 3 was pushed
 at.
 
-Where the migration stands: at b, the plan being agreed on both sides
-(2026-11-27).
+Where the migration stands: at d (2026-11-27). The 'before' round passed
+19 of its 20 runs; the M5531's mldsa-native ML-DSA-87 call faulted on its
+stack limit (step 4), so the M5531 stack moved to SRAM in both firmwares
+(`crypto-benchmark-m5531` a8a827a, `lean-bsp-numaker-m5531` c3d49e5, the
+same layout; on the board under lean-bsp: hello-world, the archive
+application, 800 KiB of heap then 250 KiB of stack, and lean-ftl's suite),
+and the M5531's five calls run again, twice.
 
-1. and 2. Done in lean-bsp, not committed yet: contracts 1.4 and 1.5, the
-   prebuilt `[app.build]`, the compiler and `gcc-ar` in
+1. and 2. Done in lean-bsp, committed and pushed (2026-11-27): lean-bsp
+   35d8d36, `lean-bsp-linux-host` 7e35bbd, `lean-bsp-nucleo-u5a5` 1d7fcbb,
+   `lean-bsp-nucleo-l552` 9084ccf, `lean-bsp-nucleo-f207` be48123,
+   `lean-bsp-numaker-m5531` b0b0dcd, `lean-bsp-pico2` ce65b8a. Contracts
+   1.4 and 1.5, the prebuilt `[app.build]`, the compiler and `gcc-ar` in
    `capabilities --json`; every BSP but `mpfs-disco-kit` at 1.5,
    `numaker-m5531`'s heap to the end of its SRAM and its stack to 124 KiB,
-   `pico2`'s Cortex-M33 flags spelled as `nucleo-u5a5`'s. Checked: lean-bsp's
-   tests; an application linking an LTO archive through `[app.build]`
+   `pico2`'s Cortex-M33 flags spelled as `nucleo-u5a5`'s. Checked:
+   lean-bsp's tests; an application linking an LTO archive through `[app.build]`
    builds on every target and runs on `linux-host`. On the boards
    (2026-11-27, through lean-hwbridge): hello-world on every board target;
    that archive application on `nucleo-u5a5`, `numaker-m5531` and both
@@ -1919,9 +1930,10 @@ Where the migration stands: at b, the plan being agreed on both sides
    `crypto-benchmark-m5531` 9fd87e7, `crypto-benchmark-rp2350` 4d12289,
    lean-benchmark 29bbdcf, wolfSSL a240b14d, PQRV 3614809, mldsa-native
    ea97cc79, mlkem-native def37022, pqm4 0dd10ee, and pico-sdk 2.2.0
-   (a1438df), pinned. lean-bsp's commits join them at c. Before them, crypto-benchmark 1bb7cde gave its
-   Cortex-M33, Cortex-M55 and `rv32imcb` targets the BSPs' flags, enabled
-   the FPU in the generic startup and gave Renode's `rv32imcb` model the
+   (a1438df), pinned; with lean-bsp's, above, they are state c. Before
+   them, crypto-benchmark 1bb7cde gave its Cortex-M33, Cortex-M55 and
+   `rv32imcb` targets the BSPs' flags, enabled the FPU in the generic
+   startup and gave Renode's `rv32imcb` model the
    A extension; lean-benchmark 29bbdcf, dilithium-lowram a597176 and a
    private library's preset took the Hazard3's extensions;
    `crypto-benchmark-stm32u5` cc9c93f masked interrupts around
