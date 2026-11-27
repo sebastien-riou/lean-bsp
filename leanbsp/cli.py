@@ -6,7 +6,7 @@ import shutil
 import sys
 from pathlib import Path
 
-from leanbsp import __version__, adapter, compat, flow
+from leanbsp import __version__, adapter, compat, flow, toolchain
 from leanbsp.errors import LeanBspError, info
 from leanbsp.fetch import fetch
 from leanbsp.manifest import load_bsp
@@ -111,14 +111,57 @@ def cmd_show_bsp(args) -> int:
     print(f'cloned:      {path}')
     print(f'version:     {bsp.version}')
     print(f'contract:    {bsp.contract_version}')
+    if bsp.mcu:
+        print(f'mcu:         {_part_line(bsp.mcu)}')
+        print(f'reserved:    {", ".join(bsp.mcu.reserved) or "nothing"}')
+    for p in bsp.parts or []:
+        print(f'part:        {p.role}: {_part_line(p)}')
     for c in bsp.cores:
         print(f'core:        {_core_line(c)}')
     for r in bsp.nvm_regions:
         print(f'nvm region:  {_nvm_line(r)}')
     for t in bsp.targets:
         primitives = ', '.join(k for k, v in t.primitives.items() if v)
-        print(f'target:      {t.name} ({_on_core(t)}cpu {t.cpu}, {t.toolchain}, {t.run_mode}): {primitives}')
+        print(f'target:      {t.name} ({_on_core(t)}cpu {t.cpu}, {t.toolchain}, {t.run_mode}{_trustzone(t)}): '
+              f'{primitives}')
     return 0
+
+
+def _part_line(part) -> str:
+    """The MCU or an outside part: `ST STM32U5A5ZJT6Q (STM32, STM32U5, STM32U5A5), not checked at startup`."""
+    families = f' ({", ".join(part.families)})' if part.families else ''
+    checked = 'checked' if part.checked else 'not checked'
+    return f'{part.vendor} {part.part}{families}, {checked} at startup'
+
+
+def _trustzone(target) -> str:
+    return f', TrustZone {target.trustzone}' if target.trustzone else ''
+
+
+def _part_json(part) -> dict:
+    found = {'vendor': part.vendor, 'part': part.part, 'families': part.families, 'checked': part.checked}
+    if part.role is not None:
+        found = {'role': part.role, **found}
+    if part.reserved is not None:
+        found['reserved'] = part.reserved
+    return found
+
+
+def _target_json(target) -> dict:
+    tools = toolchain.tools(target)
+    return {
+        'name': target.name,
+        'core_id': target.core_id,
+        'cpu': target.cpu,
+        'toolchain': target.toolchain,
+        'cflags': target.cflags,
+        'run_mode': target.run_mode,
+        'trustzone': target.trustzone,
+        'cc': tools.cc,
+        'ar': tools.ar,
+        'toolchain_problem': tools.problem,
+        'primitives': target.primitives,
+    }
 
 
 def _nvm_line(region) -> str:
@@ -254,36 +297,34 @@ def cmd_capabilities(args) -> int:
             {'id': c.id, 'cpu': c.cpu, 'cflags': c.cflags, 'count': c.count, 'description': c.description}
             for c in bsp.cores
         ],
+        'mcu': _part_json(bsp.mcu) if bsp.mcu else None,
+        'parts': [_part_json(p) for p in bsp.parts or []],
         'nvm_regions': [
             {'name': r.name, 'base': r.base, 'size': r.size, 'page_size': r.page_size, 'write_size': r.write_size,
              'zero_overwrite': r.zero_overwrite}
             for r in bsp.nvm_regions
         ],
-        'targets': [
-            {
-                'name': t.name,
-                'core_id': t.core_id,
-                'cpu': t.cpu,
-                'toolchain': t.toolchain,
-                'cflags': t.cflags,
-                'run_mode': t.run_mode,
-                'primitives': t.primitives,
-            }
-            for t in bsp.targets
-        ],
+        'targets': [_target_json(t) for t in bsp.targets],
         'dynamic': {k: v for k, v in dynamic.items() if k != 'status'},
     }
     if args.json:
         print(json.dumps(merged, indent=2))
         return 0
     print(f'{bsp.name} {bsp.version} (contract {bsp.contract_version}): {bsp.description}')
+    if bsp.mcu:
+        print(f'  mcu {_part_line(bsp.mcu)}; reserved: {", ".join(bsp.mcu.reserved) or "nothing"}')
+    for p in bsp.parts or []:
+        print(f'  part {p.role}: {_part_line(p)}')
     for c in bsp.cores:
         print(f'  core {_core_line(c)}')
     for r in bsp.nvm_regions:
         print(f'  nvm region {_nvm_line(r)}')
     for t in bsp.targets:
         supported = ', '.join(k for k, v in t.primitives.items() if v) or 'none'
-        print(f'  target {t.name}: {_on_core(t)}cpu {t.cpu}, {t.toolchain}, {t.run_mode}; primitives: {supported}')
+        tools = toolchain.tools(t)
+        compiler = tools.cc or f'no compiler ({tools.problem})'
+        print(f'  target {t.name}: {_on_core(t)}cpu {t.cpu}, {t.toolchain}, {t.run_mode}{_trustzone(t)}; '
+              f'primitives: {supported}; compiler: {compiler}')
     for k, v in merged['dynamic'].items():
         print(f'  {k}: {v}')
     return 0

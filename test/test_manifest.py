@@ -1,7 +1,7 @@
 import pytest
 
 from leanbsp.errors import LeanBspError
-from leanbsp.manifest import load_app, load_bsp, merge_defines, nvm_defines
+from leanbsp.manifest import load_app, load_bsp, macro_name, merge_defines, nvm_defines, part_defines
 
 BSP_HEAD = """\
 [bsp]
@@ -214,10 +214,44 @@ def test_app_missing_source(workspace):
         load_app(workspace.app)
 
 
-def test_app_build_not_supported_yet(workspace):
+def test_app_build_command_form_not_supported_yet(workspace):
     toml = workspace.app / 'app.toml'
     toml.write_text(toml.read_text() + '\n[app.build]\ncommand = ["./build"]\n')
-    with pytest.raises(LeanBspError, match=r'\[app.build\] is not supported yet'):
+    with pytest.raises(LeanBspError, match=r'app.build.command is not supported yet'):
+        load_app(workspace.app)
+
+
+def test_app_build_names_an_archive_per_cpu(workspace):
+    toml = workspace.app / 'app.toml'
+    toml.write_text(toml.read_text() + '\n[app.build]\nlib = "build/{cpu}/libdemo.a"\nlink_flags = ["-flto"]\n'
+                    '[app.build.link_flags_by_cpu]\nrv32imcb = ["-Wl,--no-relax-gp"]\n')
+    app = load_app(workspace.app)
+    assert app.lib_for('cortex-m33') == workspace.app / 'build' / 'cortex-m33' / 'libdemo.a'
+    assert app.link_flags_for('cortex-m33') == ['-flto']
+    assert app.link_flags_for('rv32imcb') == ['-flto', '-Wl,--no-relax-gp']
+    assert [s.name for s in app.sources] == ['main.c']  # its sources still count
+
+
+def test_app_build_alone_needs_no_sources(workspace):
+    toml = workspace.app / 'app.toml'
+    text = toml.read_text().split('[app.sources]')[0]
+    toml.write_text(text + '[app.build]\nlib = "libdemo.a"\n')
+    app = load_app(workspace.app)
+    assert app.sources == [] and app.lib_for('x') == workspace.app / 'libdemo.a'
+    toml.write_text(text)
+    with pytest.raises(LeanBspError, match='missing app.sources'):
+        load_app(workspace.app)
+
+
+@pytest.mark.parametrize('build, message', [
+    ('lib = ""', 'app.build.lib is empty'),
+    ('lib = "x.a"\nflags = []', 'unknown key'),
+    ('link_flags = []', 'missing app.build.lib'),
+])
+def test_app_build_errors(workspace, build, message):
+    toml = workspace.app / 'app.toml'
+    toml.write_text(toml.read_text() + f'\n[app.build]\n{build}\n')
+    with pytest.raises(LeanBspError, match=message):
         load_app(workspace.app)
 
 
@@ -227,3 +261,100 @@ def test_merge_defines():
         merge_defines([], ['=1'])
     with pytest.raises(LeanBspError, match='invalid define'):
         merge_defines(['1ABC'], [])
+
+
+BOARD_1_5 = """\
+[bsp]
+name = "board"
+lean_bsp_contract_version = "1.5"
+entry_point = "bsp_cli.py"
+
+[bsp.mcu]
+vendor = "ST"
+part = "STM32U5A5ZJT6Q"
+families = ["STM32", "STM32U5", "STM32U5A5"]
+reserved = ["RCC", "USART1"]
+
+[[bsp.parts]]
+role = "flash"
+vendor = "Winbond"
+part = "W25Q32RV"
+checked = true
+
+[[bsp.targets]]
+name = "m33"
+cpu = "cortex-m33"
+toolchain = "arm-none-eabi"
+run_mode = "auto-after-load"
+trustzone = "non-secure"
+
+[[bsp.targets]]
+name = "rv"
+cpu = "rv32imcb"
+toolchain = "riscv-none-elf"
+run_mode = "auto-after-load"
+"""
+
+
+def test_mcu_parts_and_trustzone(tmp_path):
+    (tmp_path / 'bsp.toml').write_text(BOARD_1_5)
+    bsp = load_bsp(tmp_path)
+    assert (bsp.mcu.vendor, bsp.mcu.part, bsp.mcu.checked) == ('ST', 'STM32U5A5ZJT6Q', False)
+    assert bsp.mcu.families == ['STM32', 'STM32U5', 'STM32U5A5'] and bsp.mcu.reserved == ['RCC', 'USART1']
+    (flash,) = bsp.parts
+    assert (flash.role, flash.vendor, flash.part, flash.checked, flash.families) == (
+        'flash', 'Winbond', 'W25Q32RV', True, [])
+    assert bsp.target('m33').trustzone == 'non-secure' and bsp.target('rv').trustzone is None
+    assert part_defines(bsp, bsp.target('m33')) == [
+        'LEAN_BSP_MCU_VENDOR="ST"', 'LEAN_BSP_MCU_PART="STM32U5A5ZJT6Q"', 'LEAN_BSP_MCU_IS_STM32U5A5ZJT6Q=1',
+        'LEAN_BSP_MCU_IS_STM32=1', 'LEAN_BSP_MCU_IS_STM32U5=1', 'LEAN_BSP_MCU_IS_STM32U5A5=1',
+        'LEAN_BSP_PART_FLASH="W25Q32RV"', 'LEAN_BSP_PART_FLASH_VENDOR="Winbond"', 'LEAN_BSP_PART_FLASH_IS_W25Q32RV=1',
+        'LEAN_BSP_TRUSTZONE_NON_SECURE=1',
+    ]
+    assert 'LEAN_BSP_TRUSTZONE_NON_SECURE=1' not in part_defines(bsp, bsp.target('rv'))
+
+
+def test_macro_names():
+    assert macro_name('non-secure') == 'NON_SECURE'
+    assert macro_name('qspi flash') == 'QSPI_FLASH'
+    assert macro_name('Nuvoton') == 'NUVOTON'
+    assert macro_name('--') == ''
+
+
+@pytest.mark.parametrize('change, message', [
+    (('[bsp.mcu]\nvendor = "ST"\npart = "STM32U5A5ZJT6Q"', '[bsp.misc]\nvendor = "ST"\npart = "x"'),
+     'missing \\[bsp.mcu\\]'),
+    (('trustzone = "non-secure"', 'trustzone = "nonsecure"'), 'trustzone must be one of'),
+    (('role = "flash"', 'role = "--"'), 'no letter or digit'),
+    (('reserved = ["RCC", "USART1"]', 'reserved = ["RCC"]\nrole = "x"'), 'unknown key'),
+    (('checked = true', 'checked = true\n\n[[bsp.parts]]\nrole = "Flash"\nvendor = "a"\npart = "b"'),
+     'two \\[\\[bsp.parts\\]\\] have the role'),
+    (('part = "W25Q32RV"\n', ''), 'missing bsp.parts\\[0\\].part'),
+])
+def test_mcu_and_parts_errors(tmp_path, change, message):
+    (tmp_path / 'bsp.toml').write_text(BOARD_1_5.replace(*change))
+    with pytest.raises(LeanBspError, match=message):
+        load_bsp(tmp_path)
+
+
+def test_trustzone_needs_1_5(tmp_path):
+    text = BOARD_1_5.replace('lean_bsp_contract_version = "1.5"', 'lean_bsp_contract_version = "1.4"')
+    text = text.split('[bsp.mcu]')[0] + '[[bsp.targets]]' + text.split('[[bsp.targets]]', 1)[1]
+    (tmp_path / 'bsp.toml').write_text(text)
+    with pytest.raises(LeanBspError, match='trustzone needs contract 1.5'):
+        load_bsp(tmp_path)
+
+
+def test_a_native_bsp_names_no_mcu(tmp_path):
+    (tmp_path / 'bsp.toml').write_text('[bsp]\nname = "host"\nlean_bsp_contract_version = "1.5"\n'
+                                       'entry_point = "bsp_cli.py"\n\n[[bsp.targets]]\nname = "native"\n'
+                                       'cpu = "native"\ntoolchain = "gcc"\nrun_mode = "native-process"\n')
+    bsp = load_bsp(tmp_path)
+    assert bsp.mcu is None and bsp.parts == [] and part_defines(bsp, bsp.target(None)) == []
+
+
+def test_mcu_needs_1_5(tmp_path):
+    text = BOARD_1_5.replace('lean_bsp_contract_version = "1.5"', 'lean_bsp_contract_version = "1.4"')
+    (tmp_path / 'bsp.toml').write_text(text.replace('trustzone = "non-secure"\n', ''))
+    with pytest.raises(LeanBspError, match=r'\[bsp.mcu\] and \[\[bsp.parts\]\] need contract 1.5 or later'):
+        load_bsp(tmp_path)

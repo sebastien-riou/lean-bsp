@@ -10,8 +10,21 @@ def supported_contracts() -> list[str]:
     return sorted(d.name for d in (files('leanbsp') / 'data' / 'contract').iterdir() if d.is_dir())
 
 
+def contract_file(contract_version: str, name: str) -> bytes:
+    return (files('leanbsp') / 'data' / 'contract' / contract_version / name).read_bytes()
+
+
 def canonical_header(contract_version: str) -> bytes:
-    return (files('leanbsp') / 'data' / 'contract' / contract_version / 'bsp_api.h').read_bytes()
+    return contract_file(contract_version, 'bsp_api.h')
+
+
+def contract_files(contract_version: str) -> dict[str, str]:
+    """The files a BSP keeps byte-identical copies of, for its contract version: where each goes in
+    the BSP, from its name in the contract. A header goes to include/, a C file to src/ (bsp_heap.c,
+    since 1.4)."""
+    shipped = sorted(f.name for f in (files('leanbsp') / 'data' / 'contract' / contract_version).iterdir()
+                     if f.is_file())
+    return {f'{"src" if name.endswith(".c") else "include"}/{name}': name for name in shipped}
 
 
 def bsp_problems(bsp: Bsp) -> list[str]:
@@ -21,12 +34,14 @@ def bsp_problems(bsp: Bsp) -> list[str]:
             f'BSP {bsp.name} implements contract {bsp.contract_version}, which this lean-bsp does not know '
             f'(known: {", ".join(supported_contracts())})'
         ]
-    header = bsp.root / 'include' / 'bsp_api.h'
-    if not header.is_file():
-        return [f'BSP {bsp.name} has no include/bsp_api.h']
-    if header.read_bytes() != canonical_header(bsp.contract_version):
-        return [f'{header} differs from the canonical bsp_api.h of contract {bsp.contract_version}']
-    return []
+    found = []
+    for where, name in contract_files(bsp.contract_version).items():
+        copy = bsp.root / where
+        if not copy.is_file():
+            found.append(f'BSP {bsp.name} has no {where}')
+        elif copy.read_bytes() != contract_file(bsp.contract_version, name):
+            found.append(f'{copy} differs from the canonical {name} of contract {bsp.contract_version}')
+    return found
 
 
 def contract_serves(bsp_version: str, app_version: str) -> bool:

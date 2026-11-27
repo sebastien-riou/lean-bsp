@@ -7,7 +7,7 @@ from pathlib import Path
 
 from leanbsp import __version__, adapter, compat
 from leanbsp.errors import LeanBspError, info
-from leanbsp.manifest import App, Bsp, Target, load_app, load_bsp, merge_defines, nvm_defines
+from leanbsp.manifest import App, Bsp, Target, load_app, load_bsp, merge_defines, nvm_defines, part_defines
 from leanbsp.registry import load_registry
 from leanbsp.workspace import (
     existing_dir,
@@ -111,7 +111,12 @@ def build(ctx: Context, cli_defines: list[str]) -> dict:
     meta = ctx.bdir / META_DIR
     meta.mkdir(parents=True, exist_ok=True)
     (meta / BUILD_RESULT).unlink(missing_ok=True)  # a failed build must not leave the previous result behind
-    defines = merge_defines([*nvm_defines(ctx.bsp), *app.defines], cli_defines)  # the BSP's geometry first
+    lib = app.lib_for(ctx.target.cpu)
+    if lib is not None and not lib.is_file():
+        raise LeanBspError(f'{app.name} names its own archive for {ctx.target.cpu}, {lib}, which does not exist: '
+                           'build it first ([app.build] in app.toml)')
+    board = [*part_defines(ctx.bsp, ctx.target), *nvm_defines(ctx.bsp)]  # what the BSP says of the board first
+    defines = merge_defines([*board, *app.defines], cli_defines)
     app_json = {
         'name': app.name,
         'root': str(app.root),
@@ -119,7 +124,8 @@ def build(ctx: Context, cli_defines: list[str]) -> dict:
         'include_dirs': [str(p) for p in app.include_dirs],
         'defines': defines,
         'linker_script': str(app.linker_script) if app.linker_script else None,
-        'lib': None,
+        'lib': str(lib) if lib else None,
+        'link_flags': app.link_flags_for(ctx.target.cpu) if lib else [],
     }
     app_json_path = meta / APP_JSON
     app_json_path.write_text(json.dumps(app_json, indent=2) + '\n', encoding='utf-8')

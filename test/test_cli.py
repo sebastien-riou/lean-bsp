@@ -1,4 +1,5 @@
 import json
+import os
 
 import pytest
 
@@ -193,6 +194,78 @@ def test_nvm_regions_are_shown_and_reach_the_build(workspace, capfd):
         'LEAN_BSP_NVM0_PAGE_SIZE=2048', 'LEAN_BSP_NVM0_WRITE_SIZE=8', 'LEAN_BSP_NVM0_ZERO_OVERWRITE=0',
         'FROM_APP=1', 'OVERRIDDEN=app',
     ]
+
+
+def make_bsp_1_5(workspace):
+    from leanbsp.compat import contract_file
+    toml = workspace.bsp / 'bsp.toml'
+    text = toml.read_text().replace('lean_bsp_contract_version = "1.0"', 'lean_bsp_contract_version = "1.5"')
+    text = text.replace('[[bsp.targets]]', '[bsp.mcu]\nvendor = "Acme"\npart = "AC123-Q"\nfamilies = ["AC1"]\n'
+                        'reserved = ["TIMER0"]\n\n[[bsp.parts]]\nrole = "flash"\nvendor = "Winbond"\n'
+                        'part = "W25Q32RV"\nchecked = true\n\n[[bsp.targets]]', 1)
+    text = text.replace('run_mode = "auto-after-load"', 'run_mode = "auto-after-load"\ntrustzone = "secure"')
+    toml.write_text(text)
+    (workspace.bsp / 'include' / 'bsp_api.h').write_bytes(contract_file('1.5', 'bsp_api.h'))
+    (workspace.bsp / 'src').mkdir()
+    (workspace.bsp / 'src' / 'bsp_heap.c').write_bytes(contract_file('1.5', 'bsp_heap.c'))
+
+
+def test_parts_are_shown_and_reach_the_build(workspace, capfd):
+    make_bsp_1_5(workspace)
+    assert main(['show-bsp', 'fake']) == 0
+    out = capfd.readouterr().out
+    assert 'mcu:         Acme AC123-Q (AC1), not checked at startup' in out
+    assert 'reserved:    TIMER0' in out and 'part:        flash: Winbond W25Q32RV, checked at startup' in out
+    assert '(cpu fake-cpu, none, auto-after-load, TrustZone secure)' in out
+    assert main(['capabilities', '--json']) == 0
+    caps = json.loads(capfd.readouterr().out)
+    assert caps['mcu'] == {'vendor': 'Acme', 'part': 'AC123-Q', 'families': ['AC1'], 'checked': False,
+                           'reserved': ['TIMER0']}
+    assert caps['parts'] == [{'role': 'flash', 'vendor': 'Winbond', 'part': 'W25Q32RV', 'families': [],
+                              'checked': True}]
+    target = caps['targets'][0]
+    assert target['trustzone'] == 'secure'
+    assert target['cc'] is None and 'no none-gcc' in target['toolchain_problem']  # the fake BSP has no toolchain
+    assert main(['build']) == 0
+    app_json = json.loads((bdir_of(workspace) / '.lean-bsp' / 'app.json').read_text())
+    assert app_json['defines'] == [
+        'LEAN_BSP_MCU_VENDOR="Acme"', 'LEAN_BSP_MCU_PART="AC123-Q"', 'LEAN_BSP_MCU_IS_AC123_Q=1',
+        'LEAN_BSP_MCU_IS_AC1=1',
+        'LEAN_BSP_PART_FLASH="W25Q32RV"', 'LEAN_BSP_PART_FLASH_VENDOR="Winbond"', 'LEAN_BSP_PART_FLASH_IS_W25Q32RV=1',
+        'LEAN_BSP_TRUSTZONE_SECURE=1', 'FROM_APP=1', 'OVERRIDDEN=app',
+    ]
+
+
+def test_capabilities_gives_the_compiler(workspace, capfd, tmp_path, monkeypatch):
+    bindir = tmp_path / 'tools'
+    bindir.mkdir()
+    for tool in ('none-gcc', 'none-gcc-ar'):
+        (bindir / tool).write_text('#!/bin/sh\n')
+        (bindir / tool).chmod(0o755)
+    monkeypatch.setenv('PATH', f'{bindir}:{os.environ["PATH"]}')
+    monkeypatch.delenv('CROSS_COMPILE', raising=False)
+    assert main(['capabilities', '--json']) == 0
+    target = json.loads(capfd.readouterr().out)['targets'][0]
+    assert (target['cc'], target['ar'], target['toolchain_problem']) == (
+        str(bindir / 'none-gcc'), str(bindir / 'none-gcc-ar'), None)
+    monkeypatch.setenv('CROSS_COMPILE', f'{bindir}/other-')
+    assert main(['capabilities', '--json']) == 0
+    target = json.loads(capfd.readouterr().out)['targets'][0]
+    assert target['cc'] is None and 'needs a none toolchain' in target['toolchain_problem']
+
+
+def test_an_application_s_archive_reaches_the_build(workspace, capfd):
+    toml = workspace.app / 'app.toml'
+    toml.write_text(toml.read_text() + '\n[app.build]\nlib = "out/{cpu}/libdemo.a"\nlink_flags = ["-flto"]\n'
+                    '[app.build.link_flags_by_cpu]\nfake-cpu = ["-Wl,--no-relax-gp"]\n')
+    assert main(['build']) == 1
+    assert 'out/fake-cpu/libdemo.a, which does not exist: build it first' in capfd.readouterr().err
+    lib = workspace.app / 'out' / 'fake-cpu' / 'libdemo.a'
+    lib.parent.mkdir(parents=True)
+    lib.write_bytes(b'!<arch>\n')
+    assert main(['build']) == 0
+    app_json = json.loads((bdir_of(workspace) / '.lean-bsp' / 'app.json').read_text())
+    assert app_json['lib'] == str(lib) and app_json['link_flags'] == ['-flto', '-Wl,--no-relax-gp']
 
 
 def test_doctor(workspace, capfd):

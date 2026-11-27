@@ -1,11 +1,18 @@
 import pytest
 
-from leanbsp.compat import canonical_header, contract_serves, problems, supported_contracts
+from leanbsp.compat import (
+    canonical_header,
+    contract_file,
+    contract_files,
+    contract_serves,
+    problems,
+    supported_contracts,
+)
 from leanbsp.manifest import load_app, load_bsp
 
 
 def test_contracts_shipped():
-    assert {'1.0', '1.1', '1.2', '1.3'} <= set(supported_contracts())
+    assert {'1.0', '1.1', '1.2', '1.3', '1.4', '1.5'} <= set(supported_contracts())
 
 
 def test_contract_1_1_adds_the_cycle_timer_to_1_0():
@@ -31,6 +38,45 @@ def test_contract_1_3_changes_only_the_nvm_status_comment():
         return [line for line in text.splitlines() if not line.lstrip().startswith(('*', '/*'))
                 and 'LEAN_BSP_CONTRACT_VERSION' not in line]
     assert code(old) == code(new)
+
+
+def _code(text):
+    return [line for line in text.splitlines() if not line.lstrip().startswith(('*', '/*'))
+            and 'LEAN_BSP_CONTRACT_VERSION' not in line and line.strip()]
+
+
+def test_contract_1_4_changes_the_meaning_of_the_heap_use():
+    old, new = canonical_header('1.3').decode(), canonical_header('1.4').decode()
+    assert '#define LEAN_BSP_CONTRACT_VERSION "1.4"' in new
+    assert 'heap high-water mark' in old and 'heap high-water mark' not in new
+    assert 'bsp_heap.c' in new and 'SIZE_MAX' in new
+    strip = lambda lines: [line.split('/*')[0].rstrip() for line in lines]  # noqa: E731
+    assert strip(_code(old)) == strip(_code(new))  # the same declarations
+    assert contract_files('1.3') == {'include/bsp_api.h': 'bsp_api.h'}
+    assert contract_files('1.4') == {'include/bsp_api.h': 'bsp_api.h', 'src/bsp_heap.c': 'bsp_heap.c'}
+
+
+def test_contract_1_5_adds_only_the_part_macros_comment():
+    old, new = canonical_header('1.4').decode(), canonical_header('1.5').decode()
+    assert '#define LEAN_BSP_CONTRACT_VERSION "1.5"' in new
+    for added in ('LEAN_BSP_MCU_PART', 'LEAN_BSP_MCU_IS_<NAME>', 'LEAN_BSP_PART_<ROLE>', 'LEAN_BSP_TRUSTZONE_OFF'):
+        assert added in new and added not in old
+    assert _code(old) == _code(new)
+    assert contract_file('1.4', 'bsp_heap.c') == contract_file('1.5', 'bsp_heap.c')
+
+
+def test_a_1_4_bsp_keeps_a_copy_of_the_heap_counter(workspace):
+    toml = workspace.bsp / 'bsp.toml'
+    toml.write_text(toml.read_text().replace('lean_bsp_contract_version = "1.0"', 'lean_bsp_contract_version = "1.4"'))
+    (workspace.bsp / 'include' / 'bsp_api.h').write_bytes(canonical_header('1.4'))
+    app, bsp = load_app(workspace.app), load_bsp(workspace.bsp)
+    assert problems(app, bsp, bsp.target(None)) == ['BSP fake has no src/bsp_heap.c']
+    (workspace.bsp / 'src').mkdir()
+    (workspace.bsp / 'src' / 'bsp_heap.c').write_bytes(contract_file('1.4', 'bsp_heap.c') + b'\n')
+    (found,) = problems(app, bsp, bsp.target(None))
+    assert found.endswith('differs from the canonical bsp_heap.c of contract 1.4')
+    (workspace.bsp / 'src' / 'bsp_heap.c').write_bytes(contract_file('1.4', 'bsp_heap.c'))
+    assert problems(app, bsp, bsp.target(None)) == []
 
 
 @pytest.mark.parametrize('bsp_version, app_version, serves', [

@@ -63,8 +63,6 @@ def write_state(bdir: Path, **fields) -> None:
 
 def _build(bsp: Bsp, build: Build, args) -> int:
     app = json.loads(Path(args.app_json).read_text())
-    if app.get('lib'):
-        return result('error', message='prebuilt application libraries ([app.build]) are not supported yet')
     bdir = Path(args.bdir).resolve()
     bdir.mkdir(parents=True, exist_ok=True)
     try:

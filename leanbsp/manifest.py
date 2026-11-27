@@ -22,6 +22,7 @@ PRIMITIVES = (
     'flash_write',
 )
 FLASH_PRIMITIVES = ('flash_read', 'flash_erase', 'flash_write')
+TRUSTZONE_STATES = ('off', 'secure', 'non-secure')
 
 _MISSING = object()
 
@@ -91,6 +92,18 @@ class NvmRegion:
 
 
 @dataclass
+class Part:
+    """The board's MCU ([bsp.mcu]) or a part outside it ([[bsp.parts]]), contract 1.5."""
+
+    vendor: str
+    part: str  # the ordering code, from the board vendor's documentation
+    families: list[str]  # the vendor's names for what the part belongs to, widest first
+    checked: bool  # the BSP checks at startup what the part says of itself
+    role: str | None = None  # an outside part: what the board uses it for, unique within the BSP
+    reserved: list[str] | None = None  # the MCU: the peripherals the BSP keeps for itself
+
+
+@dataclass
 class Target:
     name: str
     cpu: str
@@ -100,6 +113,7 @@ class Target:
     run_mode: str
     core_id: str | None  # the core the application runs on, when the BSP describes its cores
     primitives: dict[str, bool]  # effective: BSP defaults merged with this target's override
+    trustzone: str | None = None  # the security state the application runs in, on an Armv8-M CPU with TrustZone
 
 
 @dataclass
@@ -116,6 +130,8 @@ class Bsp:
     cores: list[Core]
     nvm_regions: list[NvmRegion]
     targets: list[Target]
+    mcu: Part | None = None
+    parts: list[Part] | None = None
 
     def target(self, name: str | None) -> Target:
         """The target named `name`, or the only one when `name` is None."""
@@ -178,6 +194,13 @@ def load_bsp(root: Path) -> Bsp:
         run_mode = _get(t, 'run_mode', path, where)
         if run_mode not in RUN_MODES:
             raise LeanBspError(f'{path}: {where}.run_mode must be one of {", ".join(RUN_MODES)}')
+        trustzone = _get(t, 'trustzone', path, where, str, None)
+        if trustzone is not None:
+            if trustzone not in TRUSTZONE_STATES:
+                raise LeanBspError(f'{path}: {where}.trustzone must be one of {", ".join(TRUSTZONE_STATES)}')
+            if not _contract_at_least(contract_version, 1, 5):
+                raise LeanBspError(f'{path}: {where}.trustzone needs contract 1.5 or later, '
+                                   f'the BSP implements {contract_version}')
         override_table = _get(t, 'primitives_override', path, where, dict, {})
         override = _primitives(override_table, path, f'{where}.primitives_override')
         flash = [p for p in FLASH_PRIMITIVES if {**defaults, **override}[p]]
@@ -193,10 +216,12 @@ def load_bsp(root: Path) -> Bsp:
                 run_mode=run_mode,
                 core_id=core_id,
                 primitives={**defaults, **override},
+                trustzone=trustzone,
             )
         )
     if not targets:
         raise LeanBspError(f'{path}: [[bsp.targets]] is empty')
+    mcu, parts = _parts(bsp, path, contract_version, targets)
 
     return Bsp(
         root=root,
@@ -211,6 +236,8 @@ def load_bsp(root: Path) -> Bsp:
         cores=list(cores.values()),
         nvm_regions=nvm_regions,
         targets=targets,
+        mcu=mcu,
+        parts=parts,
     )
 
 
@@ -257,6 +284,82 @@ def _nvm_regions(bsp: dict, path: Path, contract_version: str) -> list[NvmRegion
     return regions
 
 
+def _part(table: Any, path: Path, where: str, *, role: bool) -> Part:
+    if not isinstance(table, dict):
+        raise LeanBspError(f'{path}: {where} must be a table')
+    known = {'vendor', 'part', 'families', 'checked', 'role' if role else 'reserved'}
+    unknown = sorted(set(table) - known)
+    if unknown:
+        raise LeanBspError(f'{path}: unknown key(s) in {where}: {", ".join(unknown)}; '
+                           f'known: {", ".join(sorted(known))}')
+    part = Part(
+        vendor=_get(table, 'vendor', path, where),
+        part=_get(table, 'part', path, where),
+        families=_str_list(table, 'families', path, where, []),
+        checked=_get(table, 'checked', path, where, bool, False),
+        role=_get(table, 'role', path, where) if role else None,
+        reserved=None if role else _str_list(table, 'reserved', path, where, []),
+    )
+    for name in (part.vendor, part.part, *part.families, *([part.role] if role else [])):
+        if not macro_name(name):
+            raise LeanBspError(f'{path}: {where}: {name!r} has no letter or digit to name a define after')
+    return part
+
+
+def _parts(bsp: dict, path: Path, contract_version: str, targets: list[Target]) -> tuple[Part | None, list[Part]]:
+    """[bsp.mcu] and [[bsp.parts]], contract 1.5: required of a BSP that drives a board, which every
+    BSP does but one whose targets all run as a native process (linux-host)."""
+    declared = 'mcu' in bsp or 'parts' in bsp
+    if declared and not _contract_at_least(contract_version, 1, 5):
+        raise LeanBspError(f'{path}: [bsp.mcu] and [[bsp.parts]] need contract 1.5 or later, '
+                           f'the BSP implements {contract_version}')
+    native = all(t.run_mode == 'native-process' for t in targets)
+    if 'mcu' not in bsp:
+        if _contract_at_least(contract_version, 1, 5) and not native:
+            raise LeanBspError(f'{path}: missing [bsp.mcu]: a BSP at contract 1.5 or later names the MCU it drives')
+        mcu = None
+    else:
+        mcu = _part(bsp['mcu'], path, 'bsp.mcu', role=False)
+    parts: list[Part] = []
+    for i, table in enumerate(_get(bsp, 'parts', path, 'bsp', list, [])):
+        part = _part(table, path, f'bsp.parts[{i}]', role=True)
+        if any(macro_name(p.role) == macro_name(part.role) for p in parts):
+            raise LeanBspError(f'{path}: two [[bsp.parts]] have the role {part.role!r}')
+        parts.append(part)
+    return mcu, parts
+
+
+def macro_name(name: str) -> str:
+    """A bsp.toml value as part of a define's name: upper case, '_' for every character outside A-Z
+    and 0-9; empty when it holds no letter or digit at all."""
+    if not any(c.isascii() and c.isalnum() for c in name):
+        return ''
+    return ''.join(c if c.isascii() and c.isalnum() else '_' for c in name.upper())
+
+
+def _c_string(value: str) -> str:
+    return '"' + value.replace('\\', '\\\\').replace('"', '\\"') + '"'
+
+
+def part_defines(bsp: Bsp, target: Target) -> list[str]:
+    """What the board is made of, as defines for the application's compilation (contract 1.5)."""
+    defines = []
+    if bsp.mcu is not None:
+        defines += [f'LEAN_BSP_MCU_VENDOR={_c_string(bsp.mcu.vendor)}', f'LEAN_BSP_MCU_PART={_c_string(bsp.mcu.part)}']
+        defines += [f'LEAN_BSP_MCU_IS_{n}=1' for n in _unique(macro_name(x) for x in (bsp.mcu.part, *bsp.mcu.families))]
+    for part in bsp.parts or []:
+        role = f'LEAN_BSP_PART_{macro_name(part.role)}'
+        defines += [f'{role}={_c_string(part.part)}', f'{role}_VENDOR={_c_string(part.vendor)}']
+        defines += [f'{role}_IS_{n}=1' for n in _unique(macro_name(x) for x in (part.part, *part.families))]
+    if target.trustzone is not None:
+        defines.append(f'LEAN_BSP_TRUSTZONE_{macro_name(target.trustzone)}=1')
+    return defines
+
+
+def _unique(names) -> list[str]:
+    return list(dict.fromkeys(names))
+
+
 def nvm_defines(bsp: Bsp) -> list[str]:
     """The geometry of the BSP's NVM regions, as defines for the application's compilation."""
     if not bsp.nvm_regions:
@@ -286,19 +389,48 @@ class App:
     include_dirs: list[Path]
     defines: list[str]
     linker_script: Path | None
+    lib: str | None = None  # [app.build]: the archive the application builds itself, {cpu} for the target's cpu
+    link_flags: list[str] | None = None  # [app.build]: what linking that archive needs
+    link_flags_by_cpu: dict[str, list[str]] | None = None  # [app.build]: more of them, for one cpu
+
+    def lib_for(self, cpu: str) -> Path | None:
+        """The archive for a target's cpu, when the application builds one ([app.build])."""
+        return (self.root / self.lib.replace('{cpu}', cpu)).resolve() if self.lib else None
+
+    def link_flags_for(self, cpu: str) -> list[str]:
+        return [*(self.link_flags or []), *(self.link_flags_by_cpu or {}).get(cpu, [])]
+
+
+def _app_build(app: dict, path: Path) -> tuple[str | None, list[str], dict[str, list[str]]]:
+    """[app.build] in its prebuilt form: an archive the application built itself, which the BSP links."""
+    if 'build' not in app:
+        return None, [], {}
+    build = _get(app, 'build', path, 'app', dict)
+    if 'command' in build:
+        raise LeanBspError(f'{path}: app.build.command is not supported yet: build the archive yourself and name it '
+                           'in app.build.lib')
+    unknown = sorted(set(build) - {'lib', 'link_flags', 'link_flags_by_cpu'})
+    if unknown:
+        raise LeanBspError(f'{path}: unknown key(s) in app.build: {", ".join(unknown)}; '
+                           'known: lib, link_flags, link_flags_by_cpu')
+    lib = _get(build, 'lib', path, 'app.build')
+    if not lib:
+        raise LeanBspError(f'{path}: app.build.lib is empty')
+    by_cpu = _get(build, 'link_flags_by_cpu', path, 'app.build', dict, {})
+    return (lib, _str_list(build, 'link_flags', path, 'app.build', []),
+            {cpu: _str_list(by_cpu, cpu, path, 'app.build.link_flags_by_cpu') for cpu in by_cpu})
 
 
 def load_app(root: Path) -> App:
     path = root / 'app.toml'
     app = _get(load_toml(path), 'app', path, '', dict)
-    if 'build' in app:
-        raise LeanBspError(
-            f'{path}: [app.build] is not supported yet; '
-            'this version of lean-bsp builds applications given as [app.sources]'
-        )
-    sources = _get(app, 'sources', path, 'app', dict)
-    files = _str_list(sources, 'files', path, 'app.sources')
-    if not files:
+    lib, link_flags, link_flags_by_cpu = _app_build(app, path)
+    if lib is None and 'sources' not in app:
+        raise LeanBspError(f'{path}: missing app.sources: an application gives its sources, an archive '
+                           '([app.build]), or both')
+    sources = _get(app, 'sources', path, 'app', dict, {})
+    files = _str_list(sources, 'files', path, 'app.sources', [])
+    if not files and lib is None:
         raise LeanBspError(f'{path}: app.sources.files is empty')
     source_paths = [(root / f).resolve() for f in files]
     missing = [str(p) for p in source_paths if not p.is_file()]
@@ -320,6 +452,9 @@ def load_app(root: Path) -> App:
         include_dirs=[(root / d).resolve() for d in _str_list(sources, 'include_dirs', path, 'app.sources', [])],
         defines=defines,
         linker_script=(root / custom_script).resolve() if custom_script else None,
+        lib=lib,
+        link_flags=link_flags,
+        link_flags_by_cpu=link_flags_by_cpu,
     )
 
 

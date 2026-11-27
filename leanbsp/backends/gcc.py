@@ -2,37 +2,42 @@
 linked with one linker script, then the HEX and BIN images flashing tools take.
 
 The CPU flags are the target's (bsp.toml); the toolchain is the target's too: CROSS_COMPILE names
-its prefix, and must then be one for the target's triple, or else <triple>- is taken from PATH.
+its prefix, and must then be one for the target's triple, or else <triple>- is taken from PATH
+(leanbsp.toolchain). An application that builds its own archive ([app.build]) has it linked after
+its sources, with the link flags it asks for.
 """
 
 import hashlib
 import os
 import shlex
-import shutil
 import subprocess
 import sys
 from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+from leanbsp import toolchain
 from leanbsp.backends.board import BuildError
 from leanbsp.manifest import Target
 
 OPTIMISATION = ('-Og', '-g')  # the default: debuggable, and what the cycle counts in the READMEs were taken with
 
+# contract 1.4: the heap use is counted by the BSP's copy of lean-bsp's bsp_heap.c, which wraps these
+HEAP_WRAP_FLAGS = ('-Wl,--wrap=malloc,--wrap=calloc,--wrap=realloc,--wrap=free',)
+
 
 def cross_prefix(target: Target) -> str:
     """The prefix of the target's toolchain, e.g. /opt/.../bin/arm-none-eabi-."""
-    triple = target.toolchain
-    prefix = os.environ.get('CROSS_COMPILE')
-    if prefix and not prefix.endswith(f'{triple}-'):
-        raise BuildError(f"target {target.name} needs a {triple} toolchain, but CROSS_COMPILE is {prefix}: set it "
-                         f"to that toolchain's prefix, or unset it to take {triple}-gcc from PATH")
-    prefix = prefix or f'{triple}-'
-    if shutil.which(f'{prefix}gcc') is None:
-        raise BuildError(f'no {prefix}gcc: install a {triple} toolchain, and name it with CROSS_COMPILE or put it '
-                         f'in PATH')
-    return prefix
+    try:
+        return toolchain.cross_prefix(target)
+    except toolchain.ToolchainError as e:
+        raise BuildError(str(e)) from None
+
+
+def app_link_inputs(app: dict) -> list[str]:
+    """What the application adds to the link after its sources' objects: its own archive, if it
+    builds one ([app.build]), and the flags that archive needs."""
+    return [*app.get('link_flags', []), *([app['lib']] if app.get('lib') else [])]
 
 
 def build(app: dict, target: Target, bdir: Path, *, root: Path, sources: Iterable[Path],
@@ -73,7 +78,8 @@ def build(app: dict, target: Target, bdir: Path, *, root: Path, sources: Iterabl
             objects.append(str(obj))
     script = Path(app['linker_script']) if app.get('linker_script') else linker_script
     elf = bdir / f'{app["name"]}.elf'
-    link = [cc, *target.cflags, '-specs=nano.specs', f'-T{script}', *link_flags, *objects, '-Wl,--gc-sections',
+    link = [cc, *target.cflags, '-specs=nano.specs', f'-T{script}', *link_flags, *objects, *app_link_inputs(app),
+            '-Wl,--gc-sections',
             f'-Wl,-Map={bdir / (app["name"] + ".map")},--cref', '-lc', '-lm', '-lnosys', '-o', str(elf)]
     print(shlex.join(link), flush=True)
     if subprocess.run(link).returncode != 0:

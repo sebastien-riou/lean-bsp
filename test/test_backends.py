@@ -138,6 +138,19 @@ def test_build_links_in_source_order_with_the_bsp_s_optimisation(bench, capsys):
     assert objects == ['entry', 'zz_first', 'aa_second', 'main'] and '-nostartfiles' in link
 
 
+def test_build_links_the_application_s_archive_after_its_objects(bench, capsys, tmp_path):
+    described, build, app_json, bdir, calls = bench
+    app = json.loads(app_json.read_text())
+    app.update(lib=str(tmp_path / 'libapp.a'), link_flags=['-flto', '-Wl,--no-relax-gp'])
+    app_json.write_text(json.dumps(app))
+    argv = ['build', '--app-json', str(app_json), '--target', 'cortex-m0', '--bdir', str(bdir)]
+    assert board.main(described, build, argv) == 0
+    link = next(c for c in calls() if c[0] == 'fake-none-eabi-gcc' and '-c' not in c)
+    last_object = max(i for i, a in enumerate(link) if a.endswith('.o'))
+    assert link[last_object + 1:last_object + 4] == ['-flto', '-Wl,--no-relax-gp', str(tmp_path / 'libapp.a')]
+    assert link.index('-lc') > last_object + 3
+
+
 def test_build_failure_is_an_error_result(bench, capsys, tmp_path):
     described, build, app_json, bdir, _ = bench
     app = json.loads(app_json.read_text())
