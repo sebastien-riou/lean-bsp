@@ -280,6 +280,118 @@ strictest case. `lean-bsp-nucleo-u5a5` and `lean-bsp-nucleo-l552` implement
 whole destination reads erased before programming anything, stay on 1.2. So
 does lean-ftl's `app.toml`, so that all four BSPs serve it.
 
+### Part numbers (1.5, planned)
+
+Planned with the crypto-benchmark migration (§6); nothing of it is
+implemented yet.
+
+The contract abstracts little hardware, on purpose: a UART, LEDs, a
+counter, NVM regions. An application that needs more drives the hardware
+itself, and for that it must know what it runs on. ST's STM32PQC library is
+the first case: it does nothing until the CRC unit's clock is on, which is
+one register write whose address depends on the STM32 family. Up to 1.4 a
+BSP names its chip only in the free text of `description`, so such an
+application would keep its own table of board names, out of date with each
+new BSP. From 1.5 the BSP says what the board is made of, in `bsp.toml`:
+
+```toml
+[bsp.mcu]                            # the device the application runs on
+vendor = "ST"
+part = "STM32U5A5ZJT6Q"              # its ordering code
+families = ["STM32", "STM32U5", "STM32U5A5"]   # the vendor's names for what it belongs to, widest first
+checked = false                      # true: the BSP checks at startup what the device says of itself
+reserved = ["RCC", "PWR", "FLASH", "ICACHE", "DCACHE1", "SysTick", "DWT", "TIM5", "USART1"]
+
+[[bsp.parts]]                        # a part outside the MCU (this one is the Pico 2's)
+role = "flash"                       # what the board uses it for; unique within the BSP
+vendor = "Winbond"
+part = "W25Q32RV"
+checked = true                       # the BSP reads its JEDEC ID at startup
+```
+
+- `[bsp.mcu]` is required of every BSP at 1.5 that drives a board.
+  `linux-host`, whose targets all run as a native process, has none.
+- `part` is the ordering code, taken from the board vendor's documentation,
+  never guessed from the board's name. An application rarely matches on it:
+  it matches on one of `families`, the vendor's own names from the widest
+  down (here any STM32, the STM32U5 series, the STM32U5A5 line), so that a
+  second board with a chip of the same family needs no change in the
+  application.
+- `[[bsp.parts]]` lists at least the parts outside the MCU that hold the
+  application's code or data: memories first. A BSP may list any other part
+  an application could drive (a sensor, a secure element). A debug probe or
+  a level shifter is not listed.
+
+lean-bsp derives everything else from these tables, so that no two places
+can disagree:
+
+- `lbsp show-bsp` and `lbsp capabilities --json` give them as they are.
+- The application's compilation gets them as defines, as it gets the NVM
+  geometry: the strings `LEAN_BSP_MCU_VENDOR` and `LEAN_BSP_MCU_PART`, and
+  `LEAN_BSP_MCU_IS_<NAME>` defined to 1 for the part and for each family;
+  for each outside part, the strings `LEAN_BSP_PART_<ROLE>` and
+  `LEAN_BSP_PART_<ROLE>_VENDOR`, and `LEAN_BSP_PART_<ROLE>_IS_<NAME>`.
+  `<NAME>` and `<ROLE>` are the manifest's value in upper case, with `_`
+  for every character outside `A-Z` and `0-9`:
+
+  ```c
+  #if defined(LEAN_BSP_MCU_IS_STM32U5)
+  /* the STM32U5's CRC clock enable */
+  #endif
+  ```
+
+- `bsp_api.h` gains no function: the string macros serve an application
+  that reports the names at run time. The 1.5 header differs from the 1.4
+  one by the comment that lists the macros.
+- An application with a build of its own (`[app.build]`, §5) gets no define
+  from lean-bsp. Its runner reads `lbsp capabilities --json`, as
+  crypto-benchmark's `benchmark.py` does for STM32PQC's family.
+
+How far the names can be trusted. The manifest says what the BSP was
+written for and tested on. The board's name fixes the MCU; it does not fix
+the outside parts, which a later batch of the same board may replace.
+`checked = true`, on the MCU or on a part, means the BSP reads at startup
+what the part says of itself (a device ID register, a flash's JEDEC ID)
+and, when the answer is not the declared part's, reports it on UART 0 and
+stops before `app_init`: an application built for one part never runs on
+another. Such an answer identifies a family or a die, not a whole ordering
+code (the package and the temperature range are not in it), so `checked`
+covers what software can tell apart. `checked = false` means declared only.
+The silicon revision is not in the manifest, since two samples of one board
+may differ in it.
+
+Knowing the chip is half of what an application needs to touch it. The
+other half is what the BSP keeps for itself:
+
+- `reserved` lists the peripherals the BSP drives, under their names in the
+  vendor's reference manual. An application may read them and leaves them
+  as they are. Everything else belongs to the application, and the BSP does
+  not touch it once `bsp_init` has returned. lean-bsp checks nothing here:
+  the list is for people, and `lbsp show-bsp` prints it.
+- On a board, the application runs in the CPU's most privileged mode
+  (privileged thread mode on Arm, machine mode on RISC-V), as on every BSP
+  so far. On an Armv8-M CPU with TrustZone a peripheral has two addresses,
+  and which one works depends on the security state, so a target with such
+  a CPU says it: `trustzone = "off"`, `"secure"` or `"non-secure"`, passed
+  on as `LEAN_BSP_TRUSTZONE_OFF`, `_SECURE` or `_NON_SECURE`.
+- The rest of the state the BSP leaves (clock tree, power supply mode) is
+  in its README.
+
+1.5 only adds to 1.4: an application written for an earlier version sees
+nothing new. Left out until an application needs it: an `app.requires` key
+that would make `lbsp check` refuse a BSP outside a family (crypto-benchmark
+needs STM32 for one of its libraries only, and its runner sees to it).
+
+What each BSP will declare, as far as its repository shows today:
+
+| BSP | MCU part | Outside parts it must list | Still to establish |
+|---|---|---|---|
+| `nucleo-u5a5` | STM32U5A5ZJT6Q | none | `trustzone` (the firmware uses the non-secure addresses) |
+| `nucleo-l552` | STM32L552ZET6Q | none | nothing: `trustzone = "off"`, as its README says |
+| `nucleo-f207` | STM32F207ZGT6 | none | nothing (no TrustZone on a Cortex-M3) |
+| `numaker-m5531` | M5531H2LJAE | none | Nuvoton's family names, `trustzone` |
+| `pico2` | RP2350A | flash, a Winbond W25Q32RV | the flash's ordering code, `trustzone` on the Cortex-M33 target |
+
 ### The glue sequence
 
 The entire contract surface inside `main()` is four lines, owned by the BSP:
@@ -1544,7 +1656,10 @@ Decisions taken:
    own wrappers (`SKIP_PICO_MALLOC`). Every BSP moves to 1.4. As for 1.3, a
    minor version although a meaning changes: the old one (how far `_sbrk`
    moved) served hello-world only, which just prints it. §1's account of
-   the heap primitive is rewritten to match.
+   the heap primitive is rewritten to match. Contract 1.5 (§1, part
+   numbers) goes in with it, in the same pass over the BSPs: each declares
+   its MCU, its outside parts and what it reserves, and lean-bsp passes
+   them on. Every BSP ends at 1.5.
 2. lean-bsp: `[app.build]` in a prebuilt form. `app.toml` names the
    archive for each CPU and the link options it needs (`-flto`; on
    `rv32imcb` `--no-relax-gp`, the PQRV assembly using `gp`), and the BSP
@@ -1581,10 +1696,21 @@ Decisions taken:
    also has, stay out, as in pico-sdk's flags: Renode 1.16 rejects them.
    One archive per CPU serves every BSP of that CPU, so `pico2`'s spelling
    of the Cortex-M33 flags is made identical to `nucleo-u5a5`'s (they already
-   select the same multilib and macros). `crypto-benchmark-stm32u5` masks
+   select the same multilib and macros). crypto-benchmark also lists the
+   flags in the BSPs' order: an LTO object records its options, and step 5
+   compares objects byte for byte. `crypto-benchmark-stm32u5` masks
    interrupts while `lean_benchmark()` runs, as the other two boards and
-   the lean-bsp glue do. Then a baseline round on each board at that
-   commit, two on the M5531, which has no measured spread yet. Results
+   the lean-bsp glue do. STM32PQC's `cmox_ll_init` moves out of
+   `crypto-benchmark-stm32u5`'s `main.c` into crypto-benchmark's STM32PQC
+   code, so that the 'before' round proves it on the board. That code
+   switches on the CRC unit's clock itself (ST's library needs it running
+   before it does anything), writing the register of the STM32 family it
+   is built for, the U5 alone for now; the contract gains no hook for one
+   library. One `buildit` run makes the archive and the generic ELF, so
+   both carry the U5 code, in both rounds; a run without a board names no
+   family and keeps a placeholder, so its STM32PQC footprint is a few
+   bytes smaller. The baseline rounds come later (the order of work,
+   below). Results
    moving against earlier rounds do not matter here: crypto-benchmark is
    at 0.x, and what counts is that lean-bsp takes over a board set up right.
 4. crypto-benchmark as a lean-bsp application: an `app.toml` naming its
@@ -1594,38 +1720,89 @@ Decisions taken:
    from `bsp_cpu_freq_hz`, and on the U5A5 the cache state, both caches
    being always on), interrupts masked while `lean_benchmark()` runs; and
    mapping lean-benchmark's hooks onto `bsp_api.h` (`bsp_cycle_count`,
-   `bsp_clear_caches`, `bsp_heap_usage`). The BSPs already set the boards
+   `bsp_clear_caches`, `bsp_heap_usage`). The STM32 family that
+   STM32PQC's CRC clock code (step 3) is built for now comes from
+   `lbsp capabilities --json` (contract 1.5), where the board repository's
+   platform file gave it. The BSPs already set the boards
    up as the rounds were taken: the U5A5 at 160 MHz with ICACHE in 1-way
    mode and DCACHE1 on; the M5531 at 220 MHz from APLL0 with the same bus
    dividers; the Pico 2 at pico-sdk's clock, running from flash through
    its XIP cache, core 1 never started (an idle core 1 polling flash slows
    core 0 by 15 %), the Hazard3's counters running. Each BSP leaves at
-   least the stack and heap its board repository does: `nucleo-u5a5` does
-   (256 KiB of stack); `numaker-m5531` has 64 KiB, as today, so the
-   libraries that paint 160 KiB of stack still do not run there; `pico2`
-   takes crypto-benchmark-rp2350's layout, a stack growing from the top of
-   SCRATCH_Y down into main RAM, shared with the heap (160 KiB of stack
-   for some ML-DSA libraries on the Hazard3, 118 KiB of heap for wolfSSL's
-   ML-DSA-87), where pico-sdk's default reserves 2 KiB.
-5. Regression check on each board (the U5A5, the M5531, the Pico 2 on its
-   Cortex-M33 and on its Hazard3) against step 3's baseline. Exact:
+   least the stack and heap its board repository does. `nucleo-u5a5` does:
+   the same RAM region, 256 KiB of stack at its top, the heap up to it.
+   `numaker-m5531` has the same 64 KiB of stack at the top of DTCM, which
+   no library that paints 160 KiB runs on; its heap, 64 KiB today, grows
+   to the rest of the SRAM region, which the board repository's `_sbrk`
+   (libnosys's, without any limit) already gives it; wolfSSL's ML-DSA-87
+   needs 118 KiB. `pico2` does on both targets, with pico-sdk's linker script
+   as it is: there, as under crypto-benchmark-rp2350's script, the stack
+   starts at the top of SCRATCH_Y and goes down through both scratch banks
+   into main RAM, which it shares with the heap (160 KiB of stack for some
+   ML-DSA libraries on the Hazard3). pico-sdk's 2 KiB of stack is a
+   reservation, not a limit, its stack guards being off; a deep-stack
+   check on both cores proves it.
+5. Regression check: the 'after' round against the 'before' round. Both
+   run every configuration `benchmark.py` offers on each board's one-core
+   set (the U5A5, the M5531, the Pico 2 on its Cortex-M33 and on its
+   Hazard3): every library, algorithm, goal and parameter set, the private
+   libraries included, without custom options, test-vector checks or
+   two-core goals. That was 346 runs per round when counted on 2026-11-27
+   (105, 73, 94 and 74). Both rounds go the same way, one `benchmark.py`
+   call per library, algorithm and goal, the board's serial port closed
+   and the board power-cycled before each; 'before' loads through
+   `hardware-platforms/*.py`, 'after' through
+   `lbsp build-load-run --detach`. Per run, exact:
    outputs (the firmware checks them), heap, stack, and the footprint.
    Cycles, per operation (minimum, average, maximum): within 0.5 % on the
    U5A5 and the M5531, 2 % on both Pico 2 cores, where function alignment
    alone moves results by up to 1.6 %; any Pico 2 difference above 1 %
    gets its XIP miss count before it is called layout. A shift of the same
    sign across every library on a board is explained even within
-   tolerance.
+   tolerance. A configuration that fails 'before' is listed, and must fail
+   'after' at the same stage and for the same class of cause: the build or
+   the link; a lean-benchmark exception, with its code; a fault or a hang
+   (no result in time: a BSP's fault report on UART 0 and the old
+   firmware's silence are one class); a wrong output. Without a board,
+   every library object in every configuration's archive is byte-identical
+   in both rounds, and so is the generic ELF but for crypto-benchmark's
+   version string, which covers Renode and the timing report without
+   running them. What git does not carry (the private libraries and their
+   glue, ST's binary library, lean-benchmark's built files, the toolchains)
+   is recorded at 'before', by commit and diff or by SHA-256, and checked
+   unchanged at 'after'.
 6. Cross-reuse proof: hello-world, cm-trace and lean-ftl still pass on the
-   BSPs at 1.4, lean-ftl's suite on every board it ran on.
+   BSPs at 1.5, lean-ftl's suite on every board it ran on.
 7. The three board repositories are retired as the others were (README
    pointing to the lean-bsp build, then archived by the owner).
 8. The numbers: the board repositories' size against crypto-benchmark's
    glue, written up here.
 
-Where the migration stands:
+The steps above are numbered by subject. The order of work, which the
+owner set on 2026-11-27, is:
 
-3. Done, but for the baseline rounds. crypto-benchmark 1bb7cde gives its
+a. Both sides agree on this plan.
+b. lean-bsp does all of its side: steps 1, 2 and 6, and with them the
+   M5531's heap, `pico2`'s Cortex-M33 flag spelling and its deep-stack
+   check.
+c. Everything is committed and pushed, crypto-benchmark's step 3 included.
+   That is the 'before' state; its commits are recorded here.
+d. crypto-benchmark benchmarks 'before', through the board repositories:
+   one round per board, two on the M5531, which has no measured spread
+   yet.
+e. The boards migrate (step 4).
+f. crypto-benchmark benchmarks 'after', through lean-bsp.
+g. The differences are checked (step 5).
+
+So the baseline is taken in state c, not at the commits step 3 was pushed
+at.
+
+Where the migration stands: at b, the plan being agreed on both sides
+(2026-11-27).
+
+3. Pushed, but for the flag order and the CRC clock code, which are done
+   and not committed yet; no board has run them. crypto-benchmark 1bb7cde
+   gives its
    Cortex-M33, Cortex-M55 and `rv32imcb` targets the BSPs' flags, enables
    the FPU in the generic startup and gives Renode's `rv32imcb` model the
    A extension; lean-benchmark 29bbdcf, dilithium-lowram a597176 and a
@@ -1636,15 +1813,9 @@ Where the migration stands:
    on the board with it. The libraries' code is the same in the board and
    the generic ELFs. Every Arm BSP already enables the FPU before
    `app_main` (CMSIS `SystemInit` or startup on the STM32s and the M5531,
-   pico-sdk's per-core runtime init on the Pico 2). To do: the baseline
-   rounds, from crypto-benchmark 1bb7cde with `crypto-benchmark-stm32u5`
-   cc9c93f, `crypto-benchmark-m5531` 553b6a9 and `crypto-benchmark-rp2350`
-   e3678f9.
-
-Open, for the owner: STM32PQC's CRC clock on the U5A5 (`cmox_ll_init`, in
-`crypto-benchmark-stm32u5`'s `main.c` today). Recommended: in
-crypto-benchmark's STM32PQC glue, keyed on the STM32 family, that library
-being ST's only, rather than a library-specific hook in the contract.
+   pico-sdk's per-core runtime init on the Pico 2). The board
+   repositories are at cc9c93f (stm32u5), 553b6a9 (m5531) and e3678f9
+   (rp2350).
 
 Out of scope for now: helper cores, and with them the two-core goals;
 Renode; `nucleo-l552`, whose 256 KiB of SRAM cannot hold a 160 KiB stack
