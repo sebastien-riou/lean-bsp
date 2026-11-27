@@ -1567,7 +1567,8 @@ Decisions taken:
    the regression check compares only the BSP switch. On Arm, where every
    library but ST's binary STM32PQC reaches the link as LTO objects, that
    means `softfp`: the generic startup enables the FPU (lean-benchmark's
-   `setjmp` saves FPU registers). On the Cortex-M55 these flags keep
+   `setjmp` saves FPU registers). On the Cortex-M55 the FPU flag is
+   `-mfpu=auto`: the whole FPU, double precision included, and
    Helium (`__ARM_FEATURE_MVE` 3, integer and floating point), which
    implementations are meant to use: the generic ELF now has the Helium
    code that only the board firmware had, so the footprint and the timing
@@ -1576,9 +1577,10 @@ Decisions taken:
    `rv32imcb` the Zbc, Zbkc and Zbkx extensions go (the Hazard3 has none;
    no benchmarked library uses them) and Zba comes in, which moves code and
    cycles; nothing is LTO there, so the libraries built outside
-   crypto-benchmark keep their own `-march` unless aligned too. One archive
-   per CPU serves every BSP of that CPU, so `pico2`'s spelling of the
-   Cortex-M33 flags is made identical to `nucleo-u5a5`'s (they already
+   crypto-benchmark take the same `-march`. Zcb and Zcmp, which the Hazard3
+   also has, stay out, as in pico-sdk's flags: Renode 1.16 rejects them.
+   One archive per CPU serves every BSP of that CPU, so `pico2`'s spelling
+   of the Cortex-M33 flags is made identical to `nucleo-u5a5`'s (they already
    select the same multilib and macros). `crypto-benchmark-stm32u5` masks
    interrupts while `lean_benchmark()` runs, as the other two boards and
    the lean-bsp glue do. Then a baseline round on each board at that
@@ -1623,12 +1625,21 @@ Decisions taken:
 
 Where the migration stands:
 
-3. Done in crypto-benchmark, not committed yet: the flags of the
-   Cortex-M33, Cortex-M55 and `rv32imcb` targets are the BSPs', the generic
-   startup enables the FPU, Renode's `rv32imcb` model has the A extension,
-   and `crypto-benchmark-stm32u5` masks interrupts around
-   `lean_benchmark()`; the libraries' code is the same in the board and
-   the generic ELFs. To do: the baseline rounds.
+3. Done, but for the baseline rounds. crypto-benchmark 1bb7cde gives its
+   Cortex-M33, Cortex-M55 and `rv32imcb` targets the BSPs' flags, enables
+   the FPU in the generic startup and gives Renode's `rv32imcb` model the
+   A extension; lean-benchmark 29bbdcf, dilithium-lowram a597176 and a
+   private library's preset take the Hazard3's extensions;
+   `crypto-benchmark-stm32u5` cc9c93f masks interrupts around
+   `lean_benchmark()`; `crypto-benchmark-m5531` 553b6a9 builds with
+   `-mfpu=auto`, as `lean-bsp-numaker-m5531` does, whose hello-world runs
+   on the board with it. The libraries' code is the same in the board and
+   the generic ELFs. Every Arm BSP already enables the FPU before
+   `app_main` (CMSIS `SystemInit` or startup on the STM32s and the M5531,
+   pico-sdk's per-core runtime init on the Pico 2). To do: the baseline
+   rounds, from crypto-benchmark 1bb7cde with `crypto-benchmark-stm32u5`
+   cc9c93f, `crypto-benchmark-m5531` 553b6a9 and `crypto-benchmark-rp2350`
+   e3678f9.
 
 Open, for the owner: STM32PQC's CRC clock on the U5A5 (`cmox_ll_init`, in
 `crypto-benchmark-stm32u5`'s `main.c` today). Recommended: in
